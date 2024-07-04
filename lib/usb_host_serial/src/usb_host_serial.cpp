@@ -14,7 +14,7 @@ usb_host_serial::usb_host_serial()
 , _usb_lib_task_handle(nullptr)
 , _dev_config{}
 , _line_coding{} {
-  _dev_config.connection_timeout_ms = 5000;
+  _dev_config.connection_timeout_ms = 0;  // wait indefinitely for connection
   _dev_config.out_buffer_size = 512;
   _dev_config.in_buffer_size = 512;
   _dev_config.event_cb = _handle_event;
@@ -35,7 +35,13 @@ bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
     _setup();
   }
 
+  _line_coding.dwDTERate = baud;
+  _line_coding.bCharFormat = stopbits;
+  _line_coding.bParityType = parity;
+  _line_coding.bDataBits = databits;
 
+  BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 10, _usb_host_serial_task_handle);
+  assert(task_created == pdTRUE);
 }
 
 void usb_host_serial::end() {
@@ -107,6 +113,17 @@ void usb_host_serial::_usb_lib_task(void *arg) {
 
 void usb_host_serial::_usb_host_serial_task(void *arg) {
   while (1) {
-    
+    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&(reinterpret_cast<usb_host_serial*>(arg)->_dev_config)));
+    delay(10);
+    ESP_ERROR_CHECK(vcp->line_coding_set(&(reinterpret_cast<usb_host_serial*>(arg)->_line_coding)));
+
+    while (1) {
+      // check for data to send
+      //ESP_ERROR_CHECK(vcp->tx_blocking(data, sizeof(data)));
+      //ESP_ERROR_CHECK(vcp->set_control_line_state(true, true));
+      if (xSemaphoreTake(reinterpret_cast<usb_host_serial*>(arg)->_device_disconnected_sem, 0) == pdTrue) {
+        break;
+      }
+    }
   }
 }

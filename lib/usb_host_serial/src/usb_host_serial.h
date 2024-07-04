@@ -67,6 +67,7 @@ class usb_host_serial {
   SemaphoreHandle_t _device_disconnected_sem;
   usb_host_config_t _host_config;
   TaskHandle_t _usb_lib_task_handle;
+  TaskHandle_t _usb_host_serial_task_handle;
 
   cdc_acm_host_device_config_t _dev_config;
   cdc_acm_line_coding_t _line_coding;
