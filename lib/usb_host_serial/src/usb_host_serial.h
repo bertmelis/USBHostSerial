@@ -16,6 +16,7 @@ the LICENSE file.
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/ringbuf.h"
 
 #include "usb/cdc_acm_host.h"
 #include "usb/vcp_ch34x.hpp"
@@ -23,6 +24,10 @@ the LICENSE file.
 #include "usb/vcp_ftdi.hpp"
 #include "usb/vcp.hpp"
 #include "usb/usb_host.h"
+
+#ifndef USB_HOST_SERIAL_BUFFERSIZE
+  #define USB_HOST_SERIAL_BUFFERSIZE 256
+#endif
 
 class usb_host_serial {
  public:
@@ -57,6 +62,17 @@ class usb_host_serial {
   // read available data into `dest`. returns number of bytes written. maximum number of `size` bytes will be written
   std::size_t read(uint8_t *dest, std::size_t size);
 
+ protected:
+  usb_host_config_t _host_config;
+  cdc_acm_host_device_config_t _dev_config;
+  cdc_acm_line_coding_t _line_coding;
+  char _tx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
+  char _rx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
+  RingbufHandle_t _tx_buf_handle;
+  StaticRingbuffer_t _tx_buf_data;
+  RingbufHandle_t _rx_buf_handle;
+  StaticRingbuffer_t _rx_buf_data;
+
  private:
   void _setup();
   static bool _handle_rx(const uint8_t *data, size_t data_len, void *arg);
@@ -65,10 +81,7 @@ class usb_host_serial {
   static void _usb_host_serial_task(void *arg);
 
   SemaphoreHandle_t _device_disconnected_sem;
-  usb_host_config_t _host_config;
+  
   TaskHandle_t _usb_lib_task_handle;
   TaskHandle_t _usb_host_serial_task_handle;
-
-  cdc_acm_host_device_config_t _dev_config;
-  cdc_acm_line_coding_t _line_coding;
 };

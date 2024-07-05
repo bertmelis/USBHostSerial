@@ -9,21 +9,33 @@ the LICENSE file.
 #include "usb_host_serial.h"
 
 usb_host_serial::usb_host_serial()
-: _device_disconnected_sem(nullptr)
-, _host_config{}
-, _usb_lib_task_handle(nullptr)
+: _host_config{}
 , _dev_config{}
-, _line_coding{} {
+, _line_coding{}
+, _tx_buf_mem{}
+, _rx_buf_mem{}
+, _tx_buf_handle(nullptr)
+, _rx_buf_handle(nullptr)
+, _device_disconnected_sem(nullptr)
+, _usb_lib_task_handle(nullptr) {
   _dev_config.connection_timeout_ms = 0;  // wait indefinitely for connection
   _dev_config.out_buffer_size = 512;
   _dev_config.in_buffer_size = 512;
   _dev_config.event_cb = _handle_event;
   _dev_config.data_cb = _handle_rx;
   _dev_config.user_arg = this;
+
+  _tx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _tx_buf_mem, _tx_buf_data);
+  _rx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _rx_buf_mem, _rx_buf_data);
+  if (!_tx_buf_handle || !_rx_buf_handle) {
+    abort();
+  }
 }
 
 usb_host_serial::~usb_host_serial() {
   // not supported
+  vRingbufferDelete(_tx_buf_handle);
+  vRingbufferDelete(_rx_buf_handle);
   abort();
 }
 explicit operator usb_host_serial::bool() const {
@@ -49,23 +61,58 @@ void usb_host_serial::end() {
 }
 
 std::size_t usb_host_serial::write(uint8_t data) {
+  if (xRingbufferSend(_tx_buf_handle, &data, 1, 0) == pdTrue) {
+    return 1;
+  }
   return 0;
 }
 
 std::size_t usb_host_serial::write(uint8_t *data, std::size_t len) {
-  return 0;
+  std::size_t res = 0;
+  for (std::size_t i = 0; i < len; ++i) {
+    if (write([data[i]]) == 1) {
+      ++res;
+    } else {
+      break;
+    }
+  }
+  return res;
 }
 
 std::size_t usb_host_serial::available() {
-  return 0;
+  UBaseType_t uxFree;
+  UBaseType_t uxRead;
+  UBaseType_t uxWrite;
+  UBaseType_t uxAcquire;
+  UBaseType_t uxItemsWaiting;
+  vRingbufferGetInfo(_rx_buf_handle, &uxFree, &uxRead, &uxWrite, &uxAcquire, &uxItemsWaiting);
+  return uxItemsWaiting;
 }
 
 uint8_t usb_host_serial::read() {
-  return 0;
+  uint8_t retVal = 0;
+  std::size_t pxItemSize = 0;
+  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, 1);
+  if (ret) {
+    retVal = *ret;
+  }
+  return retVal;
 }
 
 std::size_t usb_host_serial::read(uint8_t *dest, std::size_t size) {
-  return 0;
+  uint8_t retVal = 0;
+  std::size_t pxItemSize = 0;
+  while (size > pxItemSize) {
+    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, size - pxItemSize);
+    if (ret) {
+      memcpy(dest, ret, pxItemSize);
+      retVal += pxItemSize;
+      vRingbufferReturnItem(_rx_buf_handle, ret);
+    } else {
+      break;
+    }
+  }
+  return retVal;
 }
 
 void usb_host_serial::_setup() {
@@ -119,7 +166,12 @@ void usb_host_serial::_usb_host_serial_task(void *arg) {
 
     while (1) {
       // check for data to send
-      //ESP_ERROR_CHECK(vcp->tx_blocking(data, sizeof(data)));
+      std::size_t pxItemSize = 0;
+      void *data = xRingbufferReceiveUpTo(_tx_buf_handle, &pxItemSize, 0, USB_HOST_SERIAL_BUFFERSIZE);
+      if (data) {
+        ESP_ERROR_CHECK(vcp->tx_blocking(data, pxItemSize));
+        vRingbufferReturnItem(_tx_buf_handle, data);
+      }
       //ESP_ERROR_CHECK(vcp->set_control_line_state(true, true));
       if (xSemaphoreTake(reinterpret_cast<usb_host_serial*>(arg)->_device_disconnected_sem, 0) == pdTrue) {
         break;
