@@ -8,6 +8,8 @@ the LICENSE file.
 
 #include "usb_host_serial.h"
 
+using namespace esp_usb;
+
 usb_host_serial::usb_host_serial()
 : _host_config{}
 , _dev_config{}
@@ -26,8 +28,8 @@ usb_host_serial::usb_host_serial()
   _dev_config.data_cb = _handle_rx;
   _dev_config.user_arg = this;
 
-  _tx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _tx_buf_mem, _tx_buf_data);
-  _rx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _rx_buf_mem, _rx_buf_data);
+  _tx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _tx_buf_mem, &_tx_buf_data);
+  _rx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _rx_buf_mem, &_rx_buf_data);
   if (!_tx_buf_handle || !_rx_buf_handle) {
     abort();
   }
@@ -55,7 +57,7 @@ bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
   _line_coding.bParityType = parity;
   _line_coding.bDataBits = databits;
 
-  BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 10, _usb_host_serial_task_handle);
+  BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 10, &_usb_host_serial_task_handle);
   assert(task_created == pdTRUE);
 }
 
@@ -71,15 +73,13 @@ std::size_t usb_host_serial::write(uint8_t data) {
 }
 
 std::size_t usb_host_serial::write(uint8_t *data, std::size_t len) {
-  std::size_t res = 0;
-  for (std::size_t i = 0; i < len; ++i) {
-    if (write([data[i]]) == 1) {
-      ++res;
-    } else {
+  std::size_t i = 0;
+  for (; i < len; ++i) {
+    if (write(data[i]) != 1) {
       break;
     }
   }
-  return res;
+  return i;
 }
 
 std::size_t usb_host_serial::available() {
@@ -124,10 +124,9 @@ void usb_host_serial::_setup() {
   ESP_ERROR_CHECK(usb_host_install(&_host_config));
 
   // Create a task that will handle USB library events
-  BaseType_t task_created = xTaskCreate(usb_lib_task, "usb_lib", 4096, this, 10, _usb_lib_task_handle);
+  BaseType_t task_created = xTaskCreate(usb_lib_task, "usb_lib", 4096, this, 10, &_usb_lib_task_handle);
   assert(task_created == pdTRUE);
 
-  ESP_LOGI(TAG, "Installing CDC-ACM driver");
   ESP_ERROR_CHECK(cdc_acm_host_install(NULL));
 
   // Register VCP drivers to VCP service
