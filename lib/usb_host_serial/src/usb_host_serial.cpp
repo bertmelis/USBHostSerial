@@ -61,7 +61,7 @@ bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
   _line_coding.bParityType = parity;
   _line_coding.bDataBits = databits;
 
-  BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 10, &_usb_host_serial_task_handle);
+  BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 1, &_usb_host_serial_task_handle);
   assert(task_created == pdTRUE);
 
   return true;
@@ -72,7 +72,7 @@ void usb_host_serial::end() {
 }
 
 std::size_t usb_host_serial::write(uint8_t data) {
-  if (xRingbufferSend(_tx_buf_handle, &data, 1, 0) == pdTRUE) {
+  if (xRingbufferSend(_tx_buf_handle, &data, 1, 10) == pdTRUE) {
     return 1;
   }
   return 0;
@@ -97,7 +97,7 @@ std::size_t usb_host_serial::available() {
 uint8_t usb_host_serial::read() {
   uint8_t retVal = 0;
   std::size_t pxItemSize = 0;
-  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, 1);
+  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, 1);
   if (ret) {
     retVal = *static_cast<uint8_t*>(ret);
   }
@@ -108,7 +108,7 @@ std::size_t usb_host_serial::read(uint8_t *dest, std::size_t size) {
   uint8_t retVal = 0;
   std::size_t pxItemSize = 0;
   while (size > pxItemSize) {
-    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, size - pxItemSize);
+    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, size - pxItemSize);
     if (ret) {
       memcpy(dest, ret, pxItemSize);
       retVal += pxItemSize;
@@ -130,7 +130,7 @@ void usb_host_serial::_setup() {
   ESP_ERROR_CHECK(usb_host_install(&_host_config));
 
   // Create a task that will handle USB library events
-  BaseType_t task_created = xTaskCreate(_usb_lib_task, "usb_lib", 4096, this, 10, &_usb_lib_task_handle);
+  BaseType_t task_created = xTaskCreate(_usb_lib_task, "usb_lib", 4096, this, 1, &_usb_lib_task_handle);
   assert(task_created == pdTRUE);
 
   ESP_ERROR_CHECK(cdc_acm_host_install(NULL));
@@ -144,7 +144,7 @@ void usb_host_serial::_setup() {
 bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
   while (lenReceived < data_len) {
-    if (xRingbufferSend(static_cast<usb_host_serial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 0) == pdFALSE) {
+    if (xRingbufferSend(static_cast<usb_host_serial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 10) == pdFALSE) {
       break;
     } else {
       ++lenReceived;
