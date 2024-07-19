@@ -62,7 +62,7 @@ void usb_host_serial::end() {
 }
 
 std::size_t usb_host_serial::write(uint8_t data) {
-  if (xRingbufferSend(_tx_buf_handle, &data, 1, 0) == pdTrue) {
+  if (xRingbufferSend(_tx_buf_handle, &data, 1, 0) == pdTRUE) {
     return 1;
   }
   return 0;
@@ -180,7 +180,7 @@ void usb_host_serial::_usb_host_serial_task(void *arg) {
         vRingbufferReturnItem(_tx_buf_handle, data);
       }
       //ESP_ERROR_CHECK(vcp->set_control_line_state(true, true));
-      if (xSemaphoreTake(reinterpret_cast<usb_host_serial*>(arg)->_device_disconnected_sem, 0) == pdTrue) {
+      if (xSemaphoreTake(reinterpret_cast<usb_host_serial*>(arg)->_device_disconnected_sem, 0) == pdTRUE) {
         break;
       }
     }
