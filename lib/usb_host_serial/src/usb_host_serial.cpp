@@ -16,6 +16,7 @@ usb_host_serial::usb_host_serial()
 , _rx_buf_mem{}
 , _tx_buf_handle(nullptr)
 , _rx_buf_handle(nullptr)
+, _setupDone(false)
 , _device_disconnected_sem(nullptr)
 , _usb_lib_task_handle(nullptr) {
   _dev_config.connection_timeout_ms = 0;  // wait indefinitely for connection
@@ -44,7 +45,8 @@ usb_host_serial:: operator bool() const {
 }
 
 bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
-  if (!_device_disconnected_sem) {
+  if (!_setupdone) {
+    _setupdone = true;
     _setup();
   }
 

@@ -72,6 +72,7 @@ class usb_host_serial {
   StaticRingbuffer_t _tx_buf_data;
   RingbufHandle_t _rx_buf_handle;
   StaticRingbuffer_t _rx_buf_data;
+  bool _setupDone;
 
  private:
   void _setup();
