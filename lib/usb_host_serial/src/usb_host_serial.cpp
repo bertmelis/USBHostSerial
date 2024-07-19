@@ -38,7 +38,8 @@ usb_host_serial::~usb_host_serial() {
   vRingbufferDelete(_rx_buf_handle);
   abort();
 }
-explicit operator usb_host_serial::bool() const {
+
+usb_host_serial:: operator bool() const {
   // empty
 }
 
@@ -134,7 +135,17 @@ void usb_host_serial::_setup() {
 }
 
 bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
-  // data received
+  std::size_t lenReceived = 0;
+  while (lenReceived < data_len) {
+    if (xRingbufferSend(_tx_buf_handle, &data[lenReceived], 1, 0) == pdFALSE) {
+      break;
+    } else {
+      ++lenReceived;
+    }
+  }
+  if (_lenReceived < data_len) {
+    // log overflow warning
+  }
   return true;
 }
 

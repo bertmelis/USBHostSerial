@@ -66,8 +66,8 @@ class usb_host_serial {
   usb_host_config_t _host_config;
   cdc_acm_host_device_config_t _dev_config;
   cdc_acm_line_coding_t _line_coding;
-  char _tx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
-  char _rx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
+  uint8_t _tx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
+  uint8_t _rx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
   RingbufHandle_t _tx_buf_handle;
   StaticRingbuffer_t _tx_buf_data;
   RingbufHandle_t _rx_buf_handle;
