@@ -8,10 +8,6 @@ the LICENSE file.
 
 #pragma once
 
-#include <stdio.h>
-#include <string.h>
-#include <map>
-
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,6 +20,9 @@ the LICENSE file.
 #include "usb/vcp_ftdi.hpp"
 #include "usb/vcp.hpp"
 #include "usb/usb_host.h"
+
+#include <cstdint>  // uint8_t
+#include <cstring>  // std::memcpy, std::size_t
 
 #ifndef USB_HOST_SERIAL_BUFFERSIZE
   #define USB_HOST_SERIAL_BUFFERSIZE 256
