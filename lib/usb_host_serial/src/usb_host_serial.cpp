@@ -99,7 +99,7 @@ uint8_t usb_host_serial::read() {
   std::size_t pxItemSize = 0;
   void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, 1);
   if (ret) {
-    retVal = *ret;
+    retVal = *static_cast<uint8_t*>(ret);
   }
   return retVal;
 }
@@ -144,7 +144,7 @@ void usb_host_serial::_setup() {
 bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
   while (lenReceived < data_len) {
-    if (xRingbufferSend(reinterpret_cast<usb_host_serial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 0) == pdFALSE) {
+    if (xRingbufferSend(static_cast<usb_host_serial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 0) == pdFALSE) {
       break;
     } else {
       ++lenReceived;
@@ -158,7 +158,7 @@ bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg
 
 void usb_host_serial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
   if (event->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
-    xSemaphoreGive(reinterpret_cast<usb_host_serial*>(user_ctx)->_device_disconnected_sem);
+    xSemaphoreGive(static_cast<usb_host_serial*>(user_ctx)->_device_disconnected_sem);
   }
 }
 
@@ -173,11 +173,11 @@ void usb_host_serial::_usb_lib_task(void *arg) {
 }
 
 void usb_host_serial::_usb_host_serial_task(void *arg) {
-  usb_host_serial* thisInstance = reinterpret_cast<usb_host_serial*>(arg);
+  usb_host_serial* thisInstance = static_cast<usb_host_serial*>(arg);
   while (1) {
-    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&thisInstance->_dev_config)));
-    delay(10);
-    ESP_ERROR_CHECK(vcp->line_coding_set(&thisInstance)->_line_coding)));
+    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&thisInstance->_dev_config));
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    ESP_ERROR_CHECK(vcp->line_coding_set(&thisInstance)->_line_coding);
 
     while (1) {
       // check for data to send
