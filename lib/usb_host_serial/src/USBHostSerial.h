@@ -4,6 +4,10 @@ Copyright (c) 2024 Bert Melis. All rights reserved.
 This work is licensed under the terms of the MIT license.  
 For a copy, see <https://opensource.org/licenses/MIT> or
 the LICENSE file.
+
+Based on example code:
+SPDX-FileCopyrightText: 2022-2024 Espressif Systems (Shanghai) CO LTD
+SPDX-License-Identifier: CC0-1.0
 */
 
 #pragma once
@@ -24,14 +28,14 @@ the LICENSE file.
 #include <cstdint>  // uint8_t
 #include <cstring>  // std::memcpy, std::size_t
 
-#ifndef USB_HOST_SERIAL_BUFFERSIZE
-  #define USB_HOST_SERIAL_BUFFERSIZE 256
+#ifndef USBHOSTSERIAL_BUFFERSIZE
+  #define USBHOSTSERIAL_BUFFERSIZE 256
 #endif
 
-class usb_host_serial {
+class USBHostSerial {
  public:
-  usb_host_serial();
-  ~usb_host_serial();
+  USBHostSerial();
+  ~USBHostSerial();
 
   // true if serial-over-usb device is available eg. a device is connected
   explicit operator bool() const;
@@ -65,8 +69,8 @@ class usb_host_serial {
   usb_host_config_t _host_config;
   cdc_acm_host_device_config_t _dev_config;
   cdc_acm_line_coding_t _line_coding;
-  uint8_t _tx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
-  uint8_t _rx_buf_mem[USB_HOST_SERIAL_BUFFERSIZE];
+  uint8_t _tx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
+  uint8_t _rx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
   RingbufHandle_t _tx_buf_handle;
   StaticRingbuffer_t _tx_buf_data;
   RingbufHandle_t _rx_buf_handle;

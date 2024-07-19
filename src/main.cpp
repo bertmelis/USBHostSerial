@@ -1,8 +1,8 @@
 #include <Arduino.h>
 
-#include <usb_host_serial.h>
+#include <USBHostSerial.h>
 
-usb_host_serial usbSerial;
+USBHostSerial usbSerial;
 
 void setup() {
   /*

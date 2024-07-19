@@ -4,13 +4,17 @@ Copyright (c) 2024 Bert Melis. All rights reserved.
 This work is licensed under the terms of the MIT license.  
 For a copy, see <https://opensource.org/licenses/MIT> or
 the LICENSE file.
+
+Based on example code:
+SPDX-FileCopyrightText: 2022-2024 Espressif Systems (Shanghai) CO LTD
+SPDX-License-Identifier: CC0-1.0
 */
 
-#include "usb_host_serial.h"
+#include "USBHostSerial.h"
 
 using namespace esp_usb;
 
-usb_host_serial::usb_host_serial()
+USBHostSerial::USBHostSerial()
 : _host_config{}
 , _dev_config{}
 , _line_coding{}
@@ -23,27 +27,27 @@ usb_host_serial::usb_host_serial()
 , _usb_lib_task_handle(nullptr)
 , _usb_host_serial_task_handle(nullptr) {
   _dev_config.connection_timeout_ms = 0;  // wait indefinitely for connection
-  _dev_config.out_buffer_size = USB_HOST_SERIAL_BUFFERSIZE;
-  _dev_config.in_buffer_size = USB_HOST_SERIAL_BUFFERSIZE;
+  _dev_config.out_buffer_size = USBHOSTSERIAL_BUFFERSIZE;
+  _dev_config.in_buffer_size = USBHOSTSERIAL_BUFFERSIZE;
   _dev_config.event_cb = _handle_event;
   _dev_config.data_cb = _handle_rx;
   _dev_config.user_arg = this;
 
-  _tx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _tx_buf_mem, &_tx_buf_data);
-  _rx_buf_handle = xRingbufferCreateStatic(USB_HOST_SERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _rx_buf_mem, &_rx_buf_data);
+  _tx_buf_handle = xRingbufferCreateStatic(USBHOSTSERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _tx_buf_mem, &_tx_buf_data);
+  _rx_buf_handle = xRingbufferCreateStatic(USBHOSTSERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _rx_buf_mem, &_rx_buf_data);
   if (!_tx_buf_handle || !_rx_buf_handle) {
     abort();
   }
 }
 
-usb_host_serial::~usb_host_serial() {
+USBHostSerial::~USBHostSerial() {
   // not supported
   vRingbufferDelete(_tx_buf_handle);
   vRingbufferDelete(_rx_buf_handle);
   abort();
 }
 
-usb_host_serial:: operator bool() const {
+USBHostSerial:: operator bool() const {
   if (xSemaphoreTake(_device_disconnected_sem, 10) == pdTRUE) {
     xSemaphoreGive(_device_disconnected_sem);
     return false;
@@ -51,7 +55,7 @@ usb_host_serial:: operator bool() const {
   return true;
 }
 
-bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
+bool USBHostSerial::begin(int baud, int stopbits, int parity, int databits) {
   if (!_setupDone) {
     _setupDone = true;
     _setup();
@@ -68,18 +72,18 @@ bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
   return false;
 }
 
-void usb_host_serial::end() {
+void USBHostSerial::end() {
   // empty
 }
 
-std::size_t usb_host_serial::write(uint8_t data) {
+std::size_t USBHostSerial::write(uint8_t data) {
   if (xRingbufferSend(_tx_buf_handle, &data, 1, 10) == pdTRUE) {
     return 1;
   }
   return 0;
 }
 
-std::size_t usb_host_serial::write(uint8_t *data, std::size_t len) {
+std::size_t USBHostSerial::write(uint8_t *data, std::size_t len) {
   std::size_t i = 0;
   for (; i < len; ++i) {
     if (write(data[i]) != 1) {
@@ -89,13 +93,13 @@ std::size_t usb_host_serial::write(uint8_t *data, std::size_t len) {
   return i;
 }
 
-std::size_t usb_host_serial::available() {
+std::size_t USBHostSerial::available() {
   std::size_t itemsWaiting;
   vRingbufferGetInfo(_rx_buf_handle, nullptr, nullptr, nullptr, nullptr, &itemsWaiting);
   return itemsWaiting;
 }
 
-uint8_t usb_host_serial::read() {
+uint8_t USBHostSerial::read() {
   uint8_t retVal = 0;
   std::size_t pxItemSize = 0;
   void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, 1);
@@ -106,7 +110,7 @@ uint8_t usb_host_serial::read() {
   return retVal;
 }
 
-std::size_t usb_host_serial::read(uint8_t *dest, std::size_t size) {
+std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
   uint8_t retVal = 0;
   std::size_t pxItemSize = 0;
   while (size > pxItemSize) {
@@ -122,7 +126,7 @@ std::size_t usb_host_serial::read(uint8_t *dest, std::size_t size) {
   return retVal;
 }
 
-void usb_host_serial::_setup() {
+void USBHostSerial::_setup() {
   _device_disconnected_sem = xSemaphoreCreateBinary();
   assert(_device_disconnected_sem);
 
@@ -143,10 +147,10 @@ void usb_host_serial::_setup() {
   VCP::register_driver<CH34x>();
 }
 
-bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
+bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
   while (lenReceived < data_len) {
-    if (xRingbufferSend(static_cast<usb_host_serial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 10) == pdFALSE) {
+    if (xRingbufferSend(static_cast<USBHostSerial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 10) == pdFALSE) {
       break;
     } else {
       ++lenReceived;
@@ -158,13 +162,13 @@ bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg
   return true;
 }
 
-void usb_host_serial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
+void USBHostSerial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
   if (event->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
-    xSemaphoreGive(static_cast<usb_host_serial*>(user_ctx)->_device_disconnected_sem);
+    xSemaphoreGive(static_cast<USBHostSerial*>(user_ctx)->_device_disconnected_sem);
   }
 }
 
-void usb_host_serial::_usb_lib_task(void *arg) {
+void USBHostSerial::_usb_lib_task(void *arg) {
   while (1) {
     uint32_t event_flags;
     usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
@@ -174,8 +178,8 @@ void usb_host_serial::_usb_lib_task(void *arg) {
   }
 }
 
-void usb_host_serial::_usb_host_serial_task(void *arg) {
-  usb_host_serial* thisInstance = static_cast<usb_host_serial*>(arg);
+void USBHostSerial::_usb_host_serial_task(void *arg) {
+  USBHostSerial* thisInstance = static_cast<USBHostSerial*>(arg);
   while (1) {
     auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&thisInstance->_dev_config));
     vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -184,7 +188,7 @@ void usb_host_serial::_usb_host_serial_task(void *arg) {
     while (1) {
       // check for data to send
       std::size_t pxItemSize = 0;
-      uint8_t *data = static_cast<uint8_t*>(xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 10, USB_HOST_SERIAL_BUFFERSIZE));
+      uint8_t *data = static_cast<uint8_t*>(xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 10, USBHOSTSERIAL_BUFFERSIZE));
       if (data) {
         ESP_ERROR_CHECK(vcp->tx_blocking(data, pxItemSize));
         vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
