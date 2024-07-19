@@ -3,14 +3,23 @@ name: Build with Platformio
 on: [push, pull_request]
 
 jobs:
-  build:
-
+  build-for-esp32s3:
     runs-on: ubuntu-latest
     container: ghcr.io/bertmelis/pio-test-container
-
+    strategy:
+      matrix:
+        example: [
+          examples/loopback/main.cpp
+        ]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Build
-        run: |
-          pio run -e default -v
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio
+      - name: Build PlatformIO examples
+        run: pio ci --lib="." --board=lolin_s3_mini
+        env:
+          PLATFORMIO_CI_SRC: ${{ matrix.example }}
