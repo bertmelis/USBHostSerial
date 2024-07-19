@@ -20,10 +20,11 @@ usb_host_serial::usb_host_serial()
 , _rx_buf_handle(nullptr)
 , _setupDone(false)
 , _device_disconnected_sem(nullptr)
-, _usb_lib_task_handle(nullptr) {
+, _usb_lib_task_handle(nullptr)
+, _usb_host_serial_task_handle(nullptr) {
   _dev_config.connection_timeout_ms = 0;  // wait indefinitely for connection
-  _dev_config.out_buffer_size = 512;
-  _dev_config.in_buffer_size = 512;
+  _dev_config.out_buffer_size = USB_HOST_SERIAL_BUFFERSIZE;
+  _dev_config.in_buffer_size = USB_HOST_SERIAL_BUFFERSIZE;
   _dev_config.event_cb = _handle_event;
   _dev_config.data_cb = _handle_rx;
   _dev_config.user_arg = this;
@@ -111,7 +112,7 @@ std::size_t usb_host_serial::read(uint8_t *dest, std::size_t size) {
   while (size > pxItemSize) {
     void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, size - pxItemSize);
     if (ret) {
-      memcpy(dest, ret, pxItemSize);
+      std::memcpy(dest, ret, pxItemSize);
       retVal += pxItemSize;
       vRingbufferReturnItem(_rx_buf_handle, ret);
     } else {
@@ -187,8 +188,8 @@ void usb_host_serial::_usb_host_serial_task(void *arg) {
       if (data) {
         ESP_ERROR_CHECK(vcp->tx_blocking(data, pxItemSize));
         vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
+        ESP_ERROR_CHECK(vcp->set_control_line_state(true, true));
       }
-      //ESP_ERROR_CHECK(vcp->set_control_line_state(true, true));
       if (xSemaphoreTake(thisInstance->_device_disconnected_sem, 0) == pdTRUE) {
         break;
       }
