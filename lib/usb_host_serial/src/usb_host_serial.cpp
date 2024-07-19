@@ -43,12 +43,16 @@ usb_host_serial::~usb_host_serial() {
 }
 
 usb_host_serial:: operator bool() const {
-  // empty
+  if (xSemaphoreTake(_device_disconnected_sem, 10) == pdTRUE) {
+    xSemaphoreGive(_device_disconnected_sem);
+    return false;
+  }
+  return true;
 }
 
 bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
-  if (!_setupdone) {
-    _setupdone = true;
+  if (!_setupDone) {
+    _setupDone = true;
     _setup();
   }
 
@@ -59,6 +63,8 @@ bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
 
   BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 10, &_usb_host_serial_task_handle);
   assert(task_created == pdTRUE);
+
+  return true;
 }
 
 void usb_host_serial::end() {
@@ -124,7 +130,7 @@ void usb_host_serial::_setup() {
   ESP_ERROR_CHECK(usb_host_install(&_host_config));
 
   // Create a task that will handle USB library events
-  BaseType_t task_created = xTaskCreate(usb_lib_task, "usb_lib", 4096, this, 10, &_usb_lib_task_handle);
+  BaseType_t task_created = xTaskCreate(_usb_lib_task, "usb_lib", 4096, this, 10, &_usb_lib_task_handle);
   assert(task_created == pdTRUE);
 
   ESP_ERROR_CHECK(cdc_acm_host_install(NULL));
@@ -138,13 +144,13 @@ void usb_host_serial::_setup() {
 bool usb_host_serial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
   while (lenReceived < data_len) {
-    if (xRingbufferSend(_tx_buf_handle, &data[lenReceived], 1, 0) == pdFALSE) {
+    if (xRingbufferSend(reinterpret_cast<usb_host_serial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 0) == pdFALSE) {
       break;
     } else {
       ++lenReceived;
     }
   }
-  if (_lenReceived < data_len) {
+  if (lenReceived < data_len) {
     // log overflow warning
   }
   return true;
@@ -167,21 +173,22 @@ void usb_host_serial::_usb_lib_task(void *arg) {
 }
 
 void usb_host_serial::_usb_host_serial_task(void *arg) {
+  usb_host_serial* thisInstance = reinterpret_cast<usb_host_serial*>(arg);
   while (1) {
-    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&(reinterpret_cast<usb_host_serial*>(arg)->_dev_config)));
+    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&thisInstance->_dev_config)));
     delay(10);
-    ESP_ERROR_CHECK(vcp->line_coding_set(&(reinterpret_cast<usb_host_serial*>(arg)->_line_coding)));
+    ESP_ERROR_CHECK(vcp->line_coding_set(&thisInstance)->_line_coding)));
 
     while (1) {
       // check for data to send
       std::size_t pxItemSize = 0;
-      void *data = xRingbufferReceiveUpTo(_tx_buf_handle, &pxItemSize, 0, USB_HOST_SERIAL_BUFFERSIZE);
+      void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 0, USB_HOST_SERIAL_BUFFERSIZE);
       if (data) {
         ESP_ERROR_CHECK(vcp->tx_blocking(data, pxItemSize));
-        vRingbufferReturnItem(_tx_buf_handle, data);
+        vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
       }
       //ESP_ERROR_CHECK(vcp->set_control_line_state(true, true));
-      if (xSemaphoreTake(reinterpret_cast<usb_host_serial*>(arg)->_device_disconnected_sem, 0) == pdTRUE) {
+      if (xSemaphoreTake(thisInstance->_device_disconnected_sem, 0) == pdTRUE) {
         break;
       }
     }
