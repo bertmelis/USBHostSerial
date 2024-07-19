@@ -80,13 +80,9 @@ std::size_t usb_host_serial::write(uint8_t *data, std::size_t len) {
 }
 
 std::size_t usb_host_serial::available() {
-  UBaseType_t uxFree;
-  UBaseType_t uxRead;
-  UBaseType_t uxWrite;
-  UBaseType_t uxAcquire;
-  UBaseType_t uxItemsWaiting;
-  vRingbufferGetInfo(_rx_buf_handle, &uxFree, &uxRead, &uxWrite, &uxAcquire, &uxItemsWaiting);
-  return uxItemsWaiting;
+  std::size_t itemsWaiting;
+  vRingbufferGetInfo(_rx_buf_handle, nullptr, nullptr, nullptr, nullptr, &itemsWaiting);
+  return itemsWaiting;
 }
 
 uint8_t usb_host_serial::read() {
