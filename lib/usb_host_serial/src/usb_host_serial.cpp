@@ -61,10 +61,10 @@ bool usb_host_serial::begin(int baud, int stopbits, int parity, int databits) {
   _line_coding.bParityType = parity;
   _line_coding.bDataBits = databits;
 
-  BaseType_t task_created = xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 1, &_usb_host_serial_task_handle);
-  assert(task_created == pdTRUE);
-
-  return true;
+  if (xTaskCreate(_usb_host_serial_task, "usb_dev_lib", 4096, this, 1, &_usb_host_serial_task_handle) == pdTRUE) {
+    return true;
+  }
+  return false;
 }
 
 void usb_host_serial::end() {
@@ -100,6 +100,7 @@ uint8_t usb_host_serial::read() {
   void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, 1);
   if (ret) {
     retVal = *static_cast<uint8_t*>(ret);
+    vRingbufferReturnItem(_rx_buf_handle, ret);
   }
   return retVal;
 }
