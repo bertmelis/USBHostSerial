@@ -177,12 +177,12 @@ void usb_host_serial::_usb_host_serial_task(void *arg) {
   while (1) {
     auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&thisInstance->_dev_config));
     vTaskDelay(10 / portTICK_PERIOD_MS);
-    ESP_ERROR_CHECK(vcp->line_coding_set(&thisInstance)->_line_coding);
+    ESP_ERROR_CHECK(vcp->line_coding_set(&thisInstance->_line_coding));
 
     while (1) {
       // check for data to send
       std::size_t pxItemSize = 0;
-      void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 0, USB_HOST_SERIAL_BUFFERSIZE);
+      uint8_t *data = static_cast<uint8_t*>(xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 0, USB_HOST_SERIAL_BUFFERSIZE));
       if (data) {
         ESP_ERROR_CHECK(vcp->tx_blocking(data, pxItemSize));
         vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
