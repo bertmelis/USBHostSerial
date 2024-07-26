@@ -45,6 +45,7 @@ class USBHostSerial {
   */
   bool begin(int baud, int stopbits, int parity, int databits);
 
+  // not yet implemented
   void end();
 
   // write one byte to serial-over-usb. returns 0 when buffer is full or device is not available
@@ -66,8 +67,8 @@ class USBHostSerial {
   usb_host_config_t _host_config;
   cdc_acm_host_device_config_t _dev_config;
   cdc_acm_line_coding_t _line_coding;
-  char _tx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
-  char _rx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
+  uint8_t _tx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
+  uint8_t _rx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
   RingbufHandle_t _tx_buf_handle;
   StaticRingbuffer_t _tx_buf_data;
   RingbufHandle_t _rx_buf_handle;
