@@ -19,6 +19,12 @@ jobs:
             ~/.cache/pip
             ~/.platformio/.cache
           key: ${{ runner.os }}-pio
+      - name: Download components/libraries
+        run: pio pkg install --global --library https://components.espressif.com/api/download/?object_type=component&object_id=569aae85-0f1c-4cf9-ac7f-0f2f28024951 |
+                                      --library https://components.espressif.com/api/download/?object_type=component&object_id=4c8aa513-4d20-4c79-8089-a5205746ef48 |
+                                      --library https://components.espressif.com/api/download/?object_type=component&object_id=eea41944-b812-4172-8d47-bd4d212748bf |
+                                      --library https://components.espressif.com/api/download/?object_type=component&object_id=4d0a4060-9c0d-41bc-89cf-729f93ec82ed |
+                                      --library https://components.espressif.com/api/download/?object_type=component&object_id=57dcefc5-645d-4db4-9d3c-b78cb8f77fc0
       - name: Build PlatformIO examples
         run: pio ci --lib="." --board=lolin_s3_mini
         env:
