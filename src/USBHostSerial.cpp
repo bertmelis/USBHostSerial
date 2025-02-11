@@ -116,7 +116,7 @@ std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
   while (size > pxItemSize) {
     void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, size - pxItemSize);
     if (ret) {
-      memcpy(dest, ret, pxItemSize);
+      std::memcpy(dest, ret, pxItemSize);
       retVal += pxItemSize;
       vRingbufferReturnItem(_rx_buf_handle, ret);
     } else {
