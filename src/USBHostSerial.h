@@ -54,7 +54,7 @@ class USBHostSerial {
   std::size_t write(uint8_t data);
 
   // write data to serial-over-usb. returns length of data that was actually written: 0 when buffer is full or device is not available
-  std::size_t write(uint8_t *data, std::size_t len);
+  std::size_t write(const uint8_t *data, std::size_t len);
 
   // get size of available RX data
   std::size_t available();
