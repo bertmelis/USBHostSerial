@@ -83,7 +83,7 @@ std::size_t USBHostSerial::write(uint8_t data) {
   return 0;
 }
 
-std::size_t USBHostSerial::write(uint8_t *data, std::size_t len) {
+std::size_t USBHostSerial::write(const uint8_t *data, std::size_t len) {
   std::size_t i = 0;
   for (; i < len; ++i) {
     if (write(data[i]) == 1) {
