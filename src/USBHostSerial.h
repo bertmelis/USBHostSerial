@@ -12,6 +12,8 @@ SPDX-License-Identifier: CC0-1.0
 
 #pragma once
 
+#include <cstring>  // std::memcpy
+
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -81,10 +83,10 @@ class USBHostSerial {
   static bool _handle_rx(const uint8_t *data, size_t data_len, void *arg);
   static void _handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx);
   static void _usb_lib_task(void *arg);
-  static void _usb_host_serial_task(void *arg);
+  static void _USBHostSerial_task(void *arg);
 
   SemaphoreHandle_t _device_disconnected_sem;
   
   TaskHandle_t _usb_lib_task_handle;
-  TaskHandle_t _usb_host_serial_task_handle;
+  TaskHandle_t _USBHostSerial_task_handle;
 };
