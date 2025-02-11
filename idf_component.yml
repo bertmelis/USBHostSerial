@@ -1,0 +1,9 @@
+dependencies:
+  usb_host_ch34x_vcp: "^2"
+  usb_host_cp210x_vcp: "^2"
+  usb_host_ftdi_vcp: "^2"
+  usb_host_vcp: "^1"
+  idf: ">=5.1.0"
+description: Use ESP32-S3 USB host as Serial
+url: https://github.com/bertmelis/USBHostSerial
+version: 0.0.1
