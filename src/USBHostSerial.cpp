@@ -150,7 +150,7 @@ void USBHostSerial::_setup() {
 bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
   while (lenReceived < data_len) {
-    if (xRingbufferSend(static_cast<USBHostSerial*>(arg)->_tx_buf_handle, &data[lenReceived], 1, 10) == pdTRUE) {
+    if (xRingbufferSend(static_cast<USBHostSerial*>(arg)->_rx_buf_handle, &data[lenReceived], 1, 10) == pdTRUE) {
       ++lenReceived;
     } else {
       break;
