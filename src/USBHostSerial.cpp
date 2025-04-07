@@ -85,12 +85,8 @@ std::size_t USBHostSerial::write(uint8_t data) {
 
 std::size_t USBHostSerial::write(const uint8_t *data, std::size_t len) {
   std::size_t i = 0;
-  for (; i < len; ++i) {
-    if (write(data[i]) == 1) {
+  while (i < len && write(data[i]) == 1) {
       ++i;
-    } else {
-      break;
-    }
   }
   return i;
 }
@@ -149,11 +145,8 @@ void USBHostSerial::_setup() {
 
 bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
-  while (lenReceived < data_len) {
-    if (xRingbufferSend(static_cast<USBHostSerial*>(arg)->_rx_buf_handle, &data[lenReceived], 1, 10) == pdTRUE) {
-      ++lenReceived;
-    } else {
-      break;
+  while (lenReceived < data_len && xRingbufferSend(static_cast<USBHostSerial*>(arg)->_rx_buf_handle, &data[lenReceived], 1, 10) == pdTRUE) {
+    ++lenReceived;
     }
   }
   if (lenReceived < data_len) {
