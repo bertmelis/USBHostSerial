@@ -26,9 +26,9 @@ USBHostSerial::USBHostSerial()
 , _connected(false)
 , _device_disconnected_sem(nullptr)
 , _usb_lib_task_handle(nullptr) {
-  _dev_config.connection_timeout_ms = 0;  // wait indefinitely for connection
-  _dev_config.out_buffer_size = 512;
-  _dev_config.in_buffer_size = 512;
+  _dev_config.connection_timeout_ms = 10;
+  _dev_config.out_buffer_size = USBHOSTSERIAL_BUFFERSIZE;
+  _dev_config.in_buffer_size = USBHOSTSERIAL_BUFFERSIZE;
   _dev_config.event_cb = _handle_event;
   _dev_config.data_cb = _handle_rx;
   _dev_config.user_arg = this;
@@ -175,20 +175,27 @@ void USBHostSerial::_usb_lib_task(void *arg) {
 void USBHostSerial::_USBHostSerial_task(void *arg) {
   USBHostSerial* thisInstance = static_cast<USBHostSerial*>(arg);
   while (1) {
+    // try to open USB VCP device
     auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&(thisInstance->_dev_config)));
     vTaskDelay( 10 / portTICK_PERIOD_MS );
+    if (vcp == nullptr) continue;
+
+    // Mark connected and configure
+    xSemaphoreTake(thisInstance->_device_disconnected_sem, portMAX_DELAY);
     ESP_ERROR_CHECK(vcp->line_coding_set(&(thisInstance->_line_coding)));
 
     while (1) {
+      // check if still connected
+      if (xSemaphoreTake(thisInstance->_device_disconnected_sem, 0) == pdTRUE) {
+        break;
+      }
+
       // check for data to send
       std::size_t pxItemSize = 0;
       void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 10, USBHOSTSERIAL_BUFFERSIZE);
-      if (data) {
+      if (pxItemSize > 0) {
         ESP_ERROR_CHECK(vcp->tx_blocking((uint8_t*)data, pxItemSize));
         vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
-      }
-      if (xSemaphoreTake(thisInstance->_device_disconnected_sem, 0) == pdTRUE) {
-        break;
       }
       taskYIELD();
     }
