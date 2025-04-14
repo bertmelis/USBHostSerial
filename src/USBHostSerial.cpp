@@ -194,7 +194,7 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
       std::size_t pxItemSize = 0;
       void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 10, USBHOSTSERIAL_BUFFERSIZE);
       if (pxItemSize > 0) {
-        ESP_ERROR_CHECK(vcp->tx_blocking((uint8_t*)data, pxItemSize));
+        ESP_ERROR_CHECK(vcp->tx_blocking((uint8_t*)data, pxItemSize, 500));
         vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
       }
       taskYIELD();
