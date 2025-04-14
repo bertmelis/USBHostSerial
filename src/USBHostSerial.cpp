@@ -99,11 +99,13 @@ std::size_t USBHostSerial::available() {
 
 uint8_t USBHostSerial::read() {
   std::size_t pxItemSize = 0;
+  uint8_t retVal = 0;
   void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, 1);
-  if (ret) {
-    return *reinterpret_cast<uint8_t*>(ret);
+  if (pxItemSize > 0) {
+    retVal = *reinterpret_cast<uint8_t*>(ret);
+    vRingbufferReturnItem(_rx_buf_handle, ret);
   }
-  return 0;
+  return ret;
 }
 
 std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
