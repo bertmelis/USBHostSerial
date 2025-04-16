@@ -105,7 +105,7 @@ uint8_t USBHostSerial::read() {
     retVal = *reinterpret_cast<uint8_t*>(ret);
     vRingbufferReturnItem(_rx_buf_handle, ret);
   }
-  return ret;
+  return retVal;
 }
 
 std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
