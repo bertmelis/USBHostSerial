@@ -16,23 +16,17 @@ using namespace esp_usb;
 
 USBHostSerial::USBHostSerial()
 : _host_config{}
-, _dev_config{}
 , _line_coding{}
 , _tx_buf_mem{}
-, _rx_buf_mem{}
 , _tx_buf_handle(nullptr)
+, _tx_buf_data{}
+, _rx_buf_mem{}
 , _rx_buf_handle(nullptr)
+, _rx_buf_data{}
 , _setupDone(false)
-, _connected(false)
 , _device_disconnected_sem(nullptr)
-, _usb_lib_task_handle(nullptr) {
-  _dev_config.connection_timeout_ms = 10;
-  _dev_config.out_buffer_size = USBHOSTSERIAL_BUFFERSIZE;
-  _dev_config.in_buffer_size = USBHOSTSERIAL_BUFFERSIZE;
-  _dev_config.event_cb = _handle_event;
-  _dev_config.data_cb = _handle_rx;
-  _dev_config.user_arg = this;
-
+, _usb_lib_task_handle(nullptr)
+, _logger(nullptr) {
   _tx_buf_handle = xRingbufferCreateStatic(USBHOSTSERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _tx_buf_mem, &_tx_buf_data);
   _rx_buf_handle = xRingbufferCreateStatic(USBHOSTSERIAL_BUFFERSIZE, RINGBUF_TYPE_BYTEBUF, _rx_buf_mem, &_rx_buf_data);
   if (!_tx_buf_handle || !_rx_buf_handle) {
@@ -67,8 +61,10 @@ bool USBHostSerial::begin(int baud, int stopbits, int parity, int databits) {
   _line_coding.bDataBits = databits;
 
   if (xTaskCreate(_USBHostSerial_task, "usb_dev_lib", 4096, this, 1, &_USBHostSerial_task_handle) == pdTRUE) {
+    _log("USB setup done");
     return true;
   }
+  _log("USB setup failed");
   return false;
 }
 
@@ -77,18 +73,25 @@ void USBHostSerial::end() {
 }
 
 std::size_t USBHostSerial::write(uint8_t data) {
-  if (xRingbufferSend(_tx_buf_handle, &data, 1, 10) == pdTRUE) {
+  if (xRingbufferSend(_tx_buf_handle, &data, 1, pdMS_TO_TICKS(1)) == pdTRUE) {
+    _log("USB write: 1");
     return 1;
   }
+  _log("USB write: 0");
   return 0;
 }
 
 std::size_t USBHostSerial::write(const uint8_t *data, std::size_t len) {
-  std::size_t i = 0;
-  while (i < len && write(data[i]) == 1) {
-      ++i;
+  UBaseType_t numItemsWaiting;
+  vRingbufferGetInfo(_tx_buf_handle, nullptr, nullptr, nullptr, nullptr, &numItemsWaiting);
+  std::size_t availableSpace = USBHOSTSERIAL_BUFFERSIZE - numItemsWaiting;
+  if (xRingbufferSend(_tx_buf_handle, &data, availableSpace, pdMS_TO_TICKS(1)) == pdTRUE) {
+    char buf[30];
+    snprintf(buf, 30, "USB write: %u", availableSpace);
+    _log(buf);
+    return availableSpace;
   }
-  return i;
+  return 0;
 }
 
 std::size_t USBHostSerial::available() {
@@ -100,11 +103,12 @@ std::size_t USBHostSerial::available() {
 uint8_t USBHostSerial::read() {
   std::size_t pxItemSize = 0;
   uint8_t retVal = 0;
-  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 0, 1);
+  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, pdMS_TO_TICKS(1), 1);
   if (pxItemSize > 0) {
     retVal = *reinterpret_cast<uint8_t*>(ret);
     vRingbufferReturnItem(_rx_buf_handle, ret);
   }
+  _log("USB read: 1");
   return retVal;
 }
 
@@ -112,7 +116,7 @@ std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
   std::size_t retVal = 0;
   std::size_t pxItemSize = 0;
   while (size > pxItemSize) {
-    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, 10, size - pxItemSize);
+    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, pdMS_TO_TICKS(1), size - pxItemSize);
     if (ret) {
       std::memcpy(dest, ret, pxItemSize);
       retVal += pxItemSize;
@@ -121,7 +125,14 @@ std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
       break;
     }
   }
+  char buf[30];
+  snprintf(buf, 30, "USB read: %u", retVal);
+  _log(buf);
   return retVal;
+}
+
+void USBHostSerial::setLogger(USBHostSerialLoggerFunc logger) {
+  _logger = logger;
 }
 
 void USBHostSerial::_setup() {
@@ -147,12 +158,16 @@ void USBHostSerial::_setup() {
 
 bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
   std::size_t lenReceived = 0;
-  while (lenReceived < data_len && xRingbufferSend(static_cast<USBHostSerial*>(arg)->_rx_buf_handle, &data[lenReceived], 1, 10) == pdTRUE) {
+  while (lenReceived < data_len && xRingbufferSend(static_cast<USBHostSerial*>(arg)->_rx_buf_handle, &data[lenReceived], 1, pdMS_TO_TICKS(10)) == pdTRUE) {
     ++lenReceived;
   }
   if (lenReceived < data_len) {
     // log overflow warning
+    static_cast<USBHostSerial*>(arg)->_log("USB rx overflow");
   }
+  char buf[30];
+  snprintf(buf, 30, "USB rx: %u", lenReceived);
+  static_cast<USBHostSerial*>(arg)->_log(buf);
   return true;
 }
 
@@ -176,8 +191,17 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
   USBHostSerial* thisInstance = static_cast<USBHostSerial*>(arg);
   while (1) {
     // try to open USB VCP device
-    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&(thisInstance->_dev_config)));
-    vTaskDelay( 10 / portTICK_PERIOD_MS );
+    const cdc_acm_host_device_config_t dev_config = {
+      .connection_timeout_ms = 10,
+      .out_buffer_size = USBHOSTSERIAL_BUFFERSIZE,
+      .in_buffer_size = USBHOSTSERIAL_BUFFERSIZE,
+      .event_cb = _handle_event,
+      .data_cb = _handle_rx,
+      .user_arg = thisInstance,
+    };
+    vTaskDelay(pdMS_TO_TICKS(10));
+    auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&dev_config));
+    vTaskDelay(pdMS_TO_TICKS(10));
     if (vcp == nullptr) continue;
 
     // Mark connected and configure
@@ -192,12 +216,21 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
 
       // check for data to send
       std::size_t pxItemSize = 0;
-      void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, 10, USBHOSTSERIAL_BUFFERSIZE);
+      void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, pdMS_TO_TICKS(10), USBHOSTSERIAL_BUFFERSIZE);
       if (pxItemSize > 0) {
         ESP_ERROR_CHECK(vcp->tx_blocking((uint8_t*)data, pxItemSize, 500));
+        char buf[30];
+        snprintf(buf, 30, "USB tx: %u", pxItemSize);
+        thisInstance->_log(buf);
         vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
       }
       taskYIELD();
     }
+  }
+}
+
+void USBHostSerial::_log(const char* msg) {
+  if (_logger) {
+    _logger(msg);
   }
 }
