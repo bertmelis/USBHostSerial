@@ -3,7 +3,7 @@ name: Build with Platformio
 on: [push, pull_request]
 
 jobs:
-  build_test_lolin_S3_mini:
+  build_test_esp32s3:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     runs-on: ubuntu-latest
     container: ghcr.io/bertmelis/pio-test-container
