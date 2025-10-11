@@ -19,9 +19,7 @@ jobs:
           path: |
             ~/.platformio/.cache
           key: ${{ runner.os }}-pio
-      - name: Update Arduino Framework
-        run: pio pkg update
       - name: Build PlatformIO examples
-        run: pio ci --lib="." --board=lolin_s3_mini
+        run: pio ci --lib="." --project-conf="./platformio.ini"
         env:
           PLATFORMIO_CI_SRC: ${{ matrix.example }}
