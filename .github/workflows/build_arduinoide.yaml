@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         fqbn:
-          - esp32:esp32:esp32
+          - esp32:esp32:lolin_s3_mini
 
     steps:
       - uses: actions/checkout@v3
