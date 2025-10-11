@@ -1,0 +1,1 @@
+../../libraries/usb_host_ch34x_vcp/include/usb/vcp_ch34x.hpp
