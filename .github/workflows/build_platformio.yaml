@@ -3,7 +3,7 @@ name: Build with Platformio
 on: [push, pull_request]
 
 jobs:
-  build-for-esp8266:
+  build_test_lolin_S3_mini:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
     runs-on: ubuntu-latest
     container: ghcr.io/bertmelis/pio-test-container
@@ -17,9 +17,10 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/pip
             ~/.platformio/.cache
           key: ${{ runner.os }}-pio
+      - name: Update Arduino Framework
+        run: pio pkg update
       - name: Build PlatformIO examples
         run: pio ci --lib="." --board=lolin_s3_mini
         env:
