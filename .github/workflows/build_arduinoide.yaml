@@ -1,0 +1,30 @@
+name: Build with Arduino IDE
+on:
+  - push
+  - pull_request
+
+jobs:
+  build-for-esp32:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        fqbn:
+          - esp32:esp32:lolin_s3_mini
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: arduino/compile-sketches@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fqbn: ${{ matrix.fqbn }}
+          enable-deltas-report: true
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          sketch-paths: |
+            - examples/loopback
+          libraries: |
+            - name: USBHostSerial
+              source-path: ./

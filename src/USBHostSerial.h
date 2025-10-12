@@ -31,6 +31,8 @@ SPDX-License-Identifier: CC0-1.0
   #define USBHOSTSERIAL_BUFFERSIZE 256
 #endif
 
+typedef void (*USBHostSerialLoggerFunc)(const char*);
+
 class USBHostSerial {
  public:
   USBHostSerial();
@@ -65,14 +67,16 @@ class USBHostSerial {
   // read available data into `dest`. returns number of bytes written. maximum number of `size` bytes will be written
   std::size_t read(uint8_t *dest, std::size_t size);
 
+  // add a logger function to direct log messages to
+  void setLogger(USBHostSerialLoggerFunc logger);
+
  protected:
   usb_host_config_t _host_config;
-  cdc_acm_host_device_config_t _dev_config;
   cdc_acm_line_coding_t _line_coding;
   uint8_t _tx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
-  uint8_t _rx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
   RingbufHandle_t _tx_buf_handle;
   StaticRingbuffer_t _tx_buf_data;
+  uint8_t _rx_buf_mem[USBHOSTSERIAL_BUFFERSIZE];
   RingbufHandle_t _rx_buf_handle;
   StaticRingbuffer_t _rx_buf_data;
   bool _setupDone;
@@ -84,9 +88,12 @@ class USBHostSerial {
   static void _handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx);
   static void _usb_lib_task(void *arg);
   static void _USBHostSerial_task(void *arg);
+  void _log(const char* msg);
 
   SemaphoreHandle_t _device_disconnected_sem;
   
   TaskHandle_t _usb_lib_task_handle;
   TaskHandle_t _USBHostSerial_task_handle;
+
+  USBHostSerialLoggerFunc _logger;
 };
