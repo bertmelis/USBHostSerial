@@ -80,6 +80,7 @@ class USBHostSerial {
   RingbufHandle_t _rx_buf_handle;
   StaticRingbuffer_t _rx_buf_data;
   bool _setupDone;
+  bool _connected;
 
  private:
   void _setup();

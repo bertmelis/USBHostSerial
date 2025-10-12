@@ -24,6 +24,7 @@ USBHostSerial::USBHostSerial()
 , _rx_buf_handle(nullptr)
 , _rx_buf_data{}
 , _setupDone(false)
+, _connected(false)
 , _device_disconnected_sem(nullptr)
 , _usb_lib_task_handle(nullptr)
 , _logger(nullptr) {
@@ -42,11 +43,7 @@ USBHostSerial::~USBHostSerial() {
 }
 
 USBHostSerial::operator bool() const {
-  if (xSemaphoreTake(_device_disconnected_sem, 0) == pdTRUE) {
-    xSemaphoreGive(_device_disconnected_sem);
-    return false;
-  }
-  return true;
+  return _connected;
 }
 
 bool USBHostSerial::begin(int baud, int stopbits, int parity, int databits) {
@@ -138,6 +135,7 @@ void USBHostSerial::setLogger(USBHostSerialLoggerFunc logger) {
 void USBHostSerial::_setup() {
   _device_disconnected_sem = xSemaphoreCreateBinary();
   assert(_device_disconnected_sem);
+  xSemaphoreGive(_device_disconnected_sem);
 
   // Install USB Host driver. Should only be called once in entire application
   _host_config.skip_phy_setup = false;
@@ -174,6 +172,7 @@ bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) 
 void USBHostSerial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
   if (event->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
     xSemaphoreGive(static_cast<USBHostSerial*>(user_ctx)->_device_disconnected_sem);
+    static_cast<USBHostSerial*>(user_ctx)->_connected = false;
   }
 }
 
@@ -205,12 +204,14 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
     if (vcp == nullptr) continue;
 
     // Mark connected and configure
+    thisInstance->_connected = true;
     xSemaphoreTake(thisInstance->_device_disconnected_sem, portMAX_DELAY);
     ESP_ERROR_CHECK(vcp->line_coding_set(&(thisInstance->_line_coding)));
 
     while (1) {
       // check if still connected
       if (xSemaphoreTake(thisInstance->_device_disconnected_sem, 0) == pdTRUE) {
+        thisInstance->_connected = false;
         break;
       }
 
