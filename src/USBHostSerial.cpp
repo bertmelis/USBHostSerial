@@ -220,10 +220,10 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
 
       // check for data to send
       std::size_t pxItemSize = 0;
-      uint8_t *data = (uint8_t*)xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, pdMS_TO_TICKS(10), USBHOSTSERIAL_BUFFERSIZE);
-      if (data && thisInstance->_connected) {
-        if (vcp->tx_blocking(data, pxItemSize, 1000) == ESP_OK) {
-          vRingbufferReturnItem(thisInstance->_tx_buf_handle, (void*)data);
+      void *data = xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, pdMS_TO_TICKS(10), USBHOSTSERIAL_BUFFERSIZE);
+      if (data) {
+        if (vcp->tx_blocking((uint8_t*)data, pxItemSize, 1000) == ESP_OK) {
+          vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
         } else {
           thisInstance->_log("Error writing to USB");
         }
