@@ -71,10 +71,8 @@ void USBHostSerial::end() {
 
 std::size_t USBHostSerial::write(uint8_t data) {
   if (xRingbufferSend(_tx_buf_handle, &data, 1, pdMS_TO_TICKS(1)) == pdTRUE) {
-    _log("USB buf write: 1");
     return 1;
   }
-  _log("USB buf write: 0");
   return 0;
 }
 
@@ -88,9 +86,6 @@ std::size_t USBHostSerial::write(const uint8_t *data, std::size_t len) {
     _log(buf);
   } else {
     if (xRingbufferSend(_tx_buf_handle, data, len, pdMS_TO_TICKS(1)) == pdTRUE) {
-      char buf[30];
-      snprintf(buf, 30, "USB buf write: %u", len);
-      _log(buf);
       return len;
     }
   }
@@ -111,7 +106,6 @@ uint8_t USBHostSerial::read() {
     retVal = *reinterpret_cast<uint8_t*>(ret);
     vRingbufferReturnItem(_rx_buf_handle, ret);
   }
-  _log("USB buf read: 1");
   return retVal;
 }
 
@@ -128,9 +122,6 @@ std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
       break;
     }
   }
-  char buf[30];
-  snprintf(buf, 30, "USB buf read: %u", retVal);
-  _log(buf);
   return retVal;
 }
 
@@ -169,9 +160,6 @@ bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) 
     // log overflow warning
     static_cast<USBHostSerial*>(arg)->_log("USB rx buf overflow");
   }
-  char buf[30];
-  snprintf(buf, 30, "USB rx: %u", lenReceived);
-  static_cast<USBHostSerial*>(arg)->_log(buf);
   return true;
 }
 
@@ -234,11 +222,11 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
       std::size_t pxItemSize = 0;
       uint8_t *data = (uint8_t*)xRingbufferReceiveUpTo(thisInstance->_tx_buf_handle, &pxItemSize, pdMS_TO_TICKS(10), USBHOSTSERIAL_BUFFERSIZE);
       if (data && thisInstance->_connected) {
-        char buf[30];
-        snprintf(buf, 30, "USB tx: %c...(%u)", data[0], pxItemSize);
-        thisInstance->_log(buf);
-        ESP_ERROR_CHECK(vcp->tx_blocking(data, pxItemSize, 1000));
-        vRingbufferReturnItem(thisInstance->_tx_buf_handle, (void*)data);
+        if (vcp->tx_blocking(data, pxItemSize, 1000) == ESP_OK) {
+          vRingbufferReturnItem(thisInstance->_tx_buf_handle, (void*)data);
+        } else {
+          thisInstance->_log("Error writing to USB");
+        }
       }
       taskYIELD();
     }
