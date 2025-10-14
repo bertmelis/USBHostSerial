@@ -35,7 +35,7 @@ typedef void (*USBHostSerialLoggerFunc)(const char*);
 
 class USBHostSerial {
  public:
-  USBHostSerial();
+  USBHostSerial(uint16_t vid = CDC_HOST_ANY_VID, uint16_t pid = CDC_HOST_ANY_PID);
   ~USBHostSerial();
 
   // true if serial-over-usb device is available eg. a device is connected
@@ -80,6 +80,10 @@ class USBHostSerial {
   RingbufHandle_t _rx_buf_handle;
   StaticRingbuffer_t _rx_buf_data;
   bool _setupDone;
+
+  bool _fallback;
+  uint16_t _vid;
+  uint16_t _pid;
 
  private:
   void _setup();
