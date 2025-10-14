@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -8,21 +8,18 @@
 #if SOC_USB_OTG_SUPPORTED
 
 #include <stdio.h>
+#include <string.h>
 #include "esp_system.h"
+#include "unity.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_err.h"
-
 #include "esp_private/usb_phy.h"
 #include "usb/usb_host.h"
 #include "usb/cdc_acm_host.h"
-#include <string.h>
-
 #include "esp_intr_alloc.h"
-
-#include "unity.h"
-#include "soc/usb_wrap_struct.h"
 
 static uint8_t tx_buf[] = "HELLO";
 static uint8_t tx_buf2[] = "WORLD";
@@ -30,59 +27,101 @@ static int nb_of_responses;
 static int nb_of_responses2;
 static bool new_dev_cb_called = false;
 static bool rx_overflow = false;
+
+// usb_host_lib_set_root_port_power is used to force toggle connection, primary developed for esp32p4
+// esp32p4 is supported from IDF 5.3
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0)
 static usb_phy_handle_t phy_hdl = NULL;
 
+// Force connection/disconnection using PHY
 static void force_conn_state(bool connected, TickType_t delay_ticks)
 {
     TEST_ASSERT_NOT_EQUAL(NULL, phy_hdl);
     if (delay_ticks > 0) {
-        //Delay of 0 ticks causes a yield. So skip if delay_ticks is 0.
+        // Delay of 0 ticks causes a yield. So skip if delay_ticks is 0.
         vTaskDelay(delay_ticks);
     }
     ESP_ERROR_CHECK(usb_phy_action(phy_hdl, (connected) ? USB_PHY_ACTION_HOST_ALLOW_CONN : USB_PHY_ACTION_HOST_FORCE_DISCONN));
 }
 
-void usb_lib_task(void *arg)
+// Initialize the internal USB PHY to connect to the USB OTG peripheral. We manually install the USB PHY for testing
+static bool install_phy(void)
 {
-    // Initialize the internal USB PHY to connect to the USB OTG peripheral. We manually install the USB PHY for testing
     usb_phy_config_t phy_config = {
         .controller = USB_PHY_CTRL_OTG,
         .target = USB_PHY_TARGET_INT,
         .otg_mode = USB_OTG_MODE_HOST,
-        .otg_speed = USB_PHY_SPEED_UNDEFINED,   //In Host mode, the speed is determined by the connected device
+        .otg_speed = USB_PHY_SPEED_UNDEFINED,   // In Host mode, the speed is determined by the connected device
     };
     TEST_ASSERT_EQUAL(ESP_OK, usb_new_phy(&phy_config, &phy_hdl));
+    // Return true, to skip_phy_setup during the usb_host_install()
+    return true;
+}
+
+static void delete_phy(void)
+{
+    TEST_ASSERT_EQUAL(ESP_OK, usb_del_phy(phy_hdl)); // Tear down USB PHY
+    phy_hdl = NULL;
+}
+#else // ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0)
+
+// Force connection/disconnection using root port power
+static void force_conn_state(bool connected, TickType_t delay_ticks)
+{
+    if (delay_ticks > 0) {
+        // Delay of 0 ticks causes a yield. So skip if delay_ticks is 0.
+        vTaskDelay(delay_ticks);
+    }
+    ESP_ERROR_CHECK(usb_host_lib_set_root_port_power(connected));
+}
+
+static bool install_phy(void)
+{
+    // Return false, NOT to skip_phy_setup during the usb_host_install()
+    return false;
+}
+
+static void delete_phy(void) {}
+#endif // ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0)
+
+void usb_lib_task(void *arg)
+{
+    const bool skip_phy_setup = install_phy();
     // Install USB Host driver. Should only be called once in entire application
     const usb_host_config_t host_config = {
-        .skip_phy_setup = true,
+        .skip_phy_setup = skip_phy_setup,
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
     };
     TEST_ASSERT_EQUAL(ESP_OK, usb_host_install(&host_config));
     printf("USB Host installed\n");
     xTaskNotifyGive(arg);
 
-    bool all_clients_gone = false;
-    bool all_dev_free = false;
-    while (!all_clients_gone || !all_dev_free) {
-        // Start handling system events
+    bool has_clients = true;
+    bool has_devices = false;
+    while (has_clients) {
         uint32_t event_flags;
-        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        ESP_ERROR_CHECK(usb_host_lib_handle_events(portMAX_DELAY, &event_flags));
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            printf("No more clients\n");
-            usb_host_device_free_all();
-            all_clients_gone = true;
+            printf("Get FLAGS_NO_CLIENTS\n");
+            if (ESP_OK == usb_host_device_free_all()) {
+                printf("All devices marked as free, no need to wait FLAGS_ALL_FREE event\n");
+                has_clients = false;
+            } else {
+                printf("Wait for the FLAGS_ALL_FREE\n");
+                has_devices = true;
+            }
         }
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            printf("All devices freed\n");
-            all_dev_free = true;
+        if (has_devices && event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            printf("Get FLAGS_ALL_FREE\n");
+            has_clients = false;
         }
     }
+    printf("No more clients and devices, uninstall USB Host library\n");
 
     // Clean up USB Host
     vTaskDelay(10); // Short delay to allow clients clean-up
     TEST_ASSERT_EQUAL(ESP_OK, usb_host_uninstall());
-    TEST_ASSERT_EQUAL(ESP_OK, usb_del_phy(phy_hdl)); //Tear down USB PHY
-    phy_hdl = NULL;
+    delete_phy();
     vTaskDelete(NULL);
 }
 
@@ -158,6 +197,7 @@ static void new_dev_cb(usb_device_handle_t usb_dev)
 /* Basic test to check CDC communication:
  * open/read/write/close device
  * CDC-ACM specific commands: set/get_line_coding, set_control_line_state */
+#define NUM_ITERATIONS 10
 TEST_CASE("read_write", "[cdc_acm]")
 {
     nb_of_responses = 0;
@@ -176,16 +216,38 @@ TEST_CASE("read_write", "[cdc_acm]")
     printf("Opening CDC-ACM device\n");
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_open(0x303A, 0x4002, 0, &dev_config, &cdc_dev)); // 0x303A:0x4002 (TinyUSB Dual CDC device)
     TEST_ASSERT_NOT_NULL(cdc_dev);
-    cdc_acm_host_desc_print(cdc_dev);
     vTaskDelay(10);
 
-    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev, tx_buf, sizeof(tx_buf), 1000));
-    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev, tx_buf, sizeof(tx_buf), 1000));
-    vTaskDelay(100); // Wait until responses are processed
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev, tx_buf, sizeof(tx_buf), 1000));
+    }
+    vTaskDelay(10); // Wait until responses are processed
 
-    // We sent two messages, should get two responses
-    TEST_ASSERT_EQUAL(2, nb_of_responses);
+    TEST_ASSERT_EQUAL(NUM_ITERATIONS, nb_of_responses);
 
+    // Clean-up
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
+}
+
+TEST_CASE("cdc_specific_commands", "[cdc_acm]")
+{
+    cdc_acm_dev_hdl_t cdc_dev = NULL;
+
+    test_install_cdc_driver();
+
+    const cdc_acm_host_device_config_t dev_config = {
+        .connection_timeout_ms = 500,
+        .out_buffer_size = 64
+    };
+
+    printf("Opening CDC-ACM device\n");
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_open(0x303A, 0x4002, 0, &dev_config, &cdc_dev)); // 0x303A:0x4002 (TinyUSB Dual CDC device)
+    TEST_ASSERT_NOT_NULL(cdc_dev);
+    vTaskDelay(10);
+
+    printf("Sending CDC specific commands\n");
     cdc_acm_line_coding_t line_coding_get;
     const cdc_acm_line_coding_t line_coding_set = {
         .dwDTERate = 9600,
@@ -198,10 +260,34 @@ TEST_CASE("read_write", "[cdc_acm]")
     TEST_ASSERT_EQUAL_MEMORY(&line_coding_set, &line_coding_get, sizeof(cdc_acm_line_coding_t));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_set_control_line_state(cdc_dev, true, false));
 
+    // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
+}
 
-    vTaskDelay(20); //Short delay to allow task to be cleaned up
+/* Test descriptor print function */
+TEST_CASE("desc_print", "[cdc_acm]")
+{
+    cdc_acm_dev_hdl_t cdc_dev = NULL;
+
+    test_install_cdc_driver();
+
+    const cdc_acm_host_device_config_t dev_config = {
+        .connection_timeout_ms = 500,
+        .out_buffer_size = 64
+    };
+
+    printf("Opening CDC-ACM device\n");
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_open(0x303A, 0x4002, 0, &dev_config, &cdc_dev)); // 0x303A:0x4002 (TinyUSB Dual CDC device)
+    TEST_ASSERT_NOT_NULL(cdc_dev);
+    cdc_acm_host_desc_print(cdc_dev);
+    vTaskDelay(10);
+
+    // Clean-up
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 /* Test communication with multiple CDC-ACM devices from one thread */
@@ -231,18 +317,17 @@ TEST_CASE("multiple_devices", "[cdc_acm]")
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev1, tx_buf, sizeof(tx_buf), 1000));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev2, tx_buf2, sizeof(tx_buf2), 1000));
 
-    vTaskDelay(100); // Wait for RX callbacks
+    vTaskDelay(10); // Wait for RX callbacks
 
     // We sent two messages, should get two responses
     TEST_ASSERT_EQUAL(1, nb_of_responses);
     TEST_ASSERT_EQUAL(1, nb_of_responses2);
 
+    // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev1));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev2));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-
-    //Short delay to allow task to be cleaned up
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 #define MULTIPLE_THREADS_TRANSFERS_NUM 5
@@ -299,7 +384,7 @@ TEST_CASE("multiple_threads", "[cdc_acm]")
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 /* Test CDC driver reaction to USB device sudden disconnection */
@@ -321,8 +406,9 @@ TEST_CASE("sudden_disconnection", "[cdc_acm]")
     force_conn_state(false, pdMS_TO_TICKS(10));                        // Simulate device disconnection
     TEST_ASSERT_EQUAL(1, ulTaskNotifyTake(false, pdMS_TO_TICKS(100))); // Notify will succeed only if CDC_ACM_HOST_DEVICE_DISCONNECTED notification was generated
 
+    // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20); //Short delay to allow task to be cleaned up
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 /**
@@ -395,7 +481,7 @@ TEST_CASE("error_handling", "[cdc_acm]")
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 TEST_CASE("custom_command", "[cdc_acm]")
@@ -420,7 +506,7 @@ TEST_CASE("custom_command", "[cdc_acm]")
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 TEST_CASE("new_device_connection_1", "[cdc_acm]")
@@ -445,7 +531,7 @@ TEST_CASE("new_device_connection_1", "[cdc_acm]")
 
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 TEST_CASE("new_device_connection_2", "[cdc_acm]")
@@ -453,7 +539,7 @@ TEST_CASE("new_device_connection_2", "[cdc_acm]")
     test_install_cdc_driver();
 
     // Option 2: Register callback after driver install
-    force_conn_state(false, 0);
+    force_conn_state(false, 50);
     vTaskDelay(50);
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_register_new_dev_callback(new_dev_cb));
     force_conn_state(true, 0);
@@ -463,9 +549,22 @@ TEST_CASE("new_device_connection_2", "[cdc_acm]")
 
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
+/**
+ * @brief CDC-ACM RX Buffer Test
+ *
+ * This test case verifies the behavior of the CDC-ACM driver when handling RX buffers.
+ * The RX callback can return 'false' to signal that the received data was not processed, which means that next RX data should be appended to the current buffer.
+ *
+ * In case the RX is full, the driver should notify the application.
+ *
+ * -# Install the CDC-ACM driver
+ * -# Open a device with in_buffer_size=512
+ * -# Receive >512 bytes of data in normal operation mode -> no error
+ * -# Receive >512 bytes of data in 'not processed' mode -> error
+ */
 TEST_CASE("rx_buffer", "[cdc_acm]")
 {
     test_install_cdc_driver();
@@ -485,8 +584,9 @@ TEST_CASE("rx_buffer", "[cdc_acm]")
     TEST_ASSERT_NOT_NULL(cdc_dev);
 
     // 1. Send > in_buffer_size bytes of data in normal operation: Expect no error
-    uint8_t tx_data[64] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf};
-    for (int i = 0; i < 10; i++) {
+    // Send 63 bytes of data. 63 because we do not want to send MPS sized packet for Full Speed devices
+    uint8_t tx_data[63] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf};
+    for (int i = 0; i < 10; i++) { // 630 (bytes sent) > 512 (in_buffer_size)
         TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev, tx_data, sizeof(tx_data), 1000));
         vTaskDelay(5);
     }
@@ -505,7 +605,12 @@ TEST_CASE("rx_buffer", "[cdc_acm]")
     // 3. Send >= (in_buffer_size - IN_MPS) bytes of data in 'not processed' mode: Expect error
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev, tx_data, sizeof(tx_data), 1000));
     vTaskDelay(5);
+
+#ifdef CONFIG_IDF_TARGET_ESP32P4    // RX buffer append is not yet supported on ESP32-P4
+    TEST_ASSERT_FALSE_MESSAGE(rx_overflow, "RX overflow");
+#else
     TEST_ASSERT_TRUE_MESSAGE(rx_overflow, "RX did not overflow");
+#endif
     rx_overflow = false;
 
     // 4. Send more data to the EP: Expect no error
@@ -517,7 +622,7 @@ TEST_CASE("rx_buffer", "[cdc_acm]")
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 TEST_CASE("functional_descriptor", "[cdc_acm]")
@@ -563,7 +668,7 @@ TEST_CASE("functional_descriptor", "[cdc_acm]")
     // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-    vTaskDelay(20);
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 /**
@@ -582,7 +687,6 @@ TEST_CASE("closing", "[cdc_acm]")
         .out_buffer_size = 64,
         .event_cb = notif_cb,
         .data_cb = handle_rx,
-        .user_arg = tx_buf,
     };
 
     printf("Opening CDC-ACM device\n");
@@ -590,12 +694,12 @@ TEST_CASE("closing", "[cdc_acm]")
     TEST_ASSERT_NOT_NULL(cdc_dev);
     vTaskDelay(10);
 
+    // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     printf("Closing already closed device \n");
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
-
-    vTaskDelay(20); //Short delay to allow task to be cleaned up
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 /* Basic test to check CDC driver reaction to TX timeout */
@@ -620,16 +724,54 @@ TEST_CASE("tx_timeout", "[cdc_acm]")
 
     // TX some data with timeout_ms=0. This will cause a timeout
     TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, cdc_acm_host_data_tx_blocking(cdc_dev, tx_buf, sizeof(tx_buf), 0));
-    vTaskDelay(100); // Wait before trying new TX
+    vTaskDelay(10); // Wait before trying new TX
 
     // TX some data again with greater timeout. This will check normal operation
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_data_tx_blocking(cdc_dev, tx_buf, sizeof(tx_buf), 1000));
-    vTaskDelay(100);
+    vTaskDelay(10);
 
+    // Clean-up
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
     TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
+}
 
-    vTaskDelay(20); //Short delay to allow task to be cleaned up
+/**
+ * @brief Test: Opening with any VID/PID
+ *
+ * #. Try to open a device with all combinations of any VID/PID
+ * #. Try to open a non-existing device with all combinations of any VID/PID
+ */
+TEST_CASE("any_vid_pid", "[cdc_acm]")
+{
+    cdc_acm_dev_hdl_t cdc_dev = NULL;
+    test_install_cdc_driver();
+
+    const cdc_acm_host_device_config_t dev_config = {
+        .connection_timeout_ms = 500,
+        .out_buffer_size = 64,
+        .event_cb = notif_cb,
+        .data_cb = handle_rx,
+        .user_arg = tx_buf,
+    };
+
+    printf("Opening existing CDC-ACM devices with any VID/PID\n");
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_open(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, 0, &dev_config, &cdc_dev));
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
+
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_open(0x303A, CDC_HOST_ANY_PID, 0, &dev_config, &cdc_dev));
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
+
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_open(CDC_HOST_ANY_VID, 0x4002, 0, &dev_config, &cdc_dev));
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_close(cdc_dev));
+
+    printf("Opening non-existing CDC-ACM devices with any VID/PID\n");
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, cdc_acm_host_open(0x1234, CDC_HOST_ANY_PID, 0, &dev_config, &cdc_dev));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, cdc_acm_host_open(CDC_HOST_ANY_VID, 0x1234, 0, &dev_config, &cdc_dev));
+
+    // Clean-up
+    TEST_ASSERT_EQUAL(ESP_OK, cdc_acm_host_uninstall());
+    vTaskDelay(20); // Short delay to allow task to be cleaned up
 }
 
 /* Following test case implements dual CDC-ACM USB device that can be used as mock device for CDC-ACM Host tests */

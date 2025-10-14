@@ -1,33 +1,33 @@
 /*
- * SPDX-FileCopyrightText: 2015-2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "esp_log.h"
-#include "inttypes.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/queue.h>
-#include "usb/usb_host.h"
-#include "usb/cdc_acm_host.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/event_groups.h"
+#include "soc/soc_caps.h"
+#include "esp_log.h"
 #include "esp_check.h"
 #include "esp_system.h"
 
+#include "usb/usb_host.h"
+#include "usb/cdc_acm_host.h"
+#include "cdc_host_descriptor_parsing.h"
+#include "cdc_host_common.h"
+#include "cdc_host_acm_compliant.h"
+
 static const char *TAG = "cdc_acm";
 
-// CDC devices often implement Interface Association Descriptor (IAD). Parse IAD only when
-// bDeviceClass = 0xEF (Miscellaneous Device Class), bDeviceSubClass = 0x02 (Common Class), bDeviceProtocol = 0x01 (Interface Association Descriptor),
-// or when bDeviceClass, bDeviceSubClass, and bDeviceProtocol are 0x00 (Null class code triple), as per https://www.usb.org/defined-class-codes, "Base Class 00h (Device)" section
-// @see USB Interface Association Descriptor: Device Class Code and Use Model rev 1.0, Table 1-1
-#define USB_SUBCLASS_NULL        0x00
-#define USB_SUBCLASS_COMMON        0x02
-#define USB_PROTOCOL_NULL    0x00
-#define USB_DEVICE_PROTOCOL_IAD    0x01
+// Control transfer constants
+#define CDC_ACM_CTRL_TRANSFER_SIZE (64)   // All standard CTRL requests and responses fit in this size
+#define CDC_ACM_CTRL_TIMEOUT_MS    (5000) // Every CDC device should be able to respond to CTRL transfer in 5 seconds
 
 // CDC-ACM spinlock
 static portMUX_TYPE cdc_acm_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -37,20 +37,6 @@ static portMUX_TYPE cdc_acm_lock = portMUX_INITIALIZER_UNLOCKED;
 // CDC-ACM events
 #define CDC_ACM_TEARDOWN          BIT0
 #define CDC_ACM_TEARDOWN_COMPLETE BIT1
-
-// CDC-ACM check macros
-#define CDC_ACM_CHECK(cond, ret_val) ({                                     \
-            if (!(cond)) {                                                  \
-                return (ret_val);                                           \
-            }                                                               \
-})
-
-#define CDC_ACM_CHECK_FROM_CRIT(cond, ret_val) ({                           \
-            if (!(cond)) {                                                  \
-                CDC_ACM_EXIT_CRITICAL();                                    \
-                return ret_val;                                             \
-            }                                                               \
-})
 
 // CDC-ACM driver object
 typedef struct {
@@ -73,36 +59,6 @@ static const cdc_acm_host_driver_config_t cdc_acm_driver_config_default = {
     .driver_task_priority = 10,
     .xCoreID = 0,
     .new_dev_cb = NULL,
-};
-
-typedef struct cdc_dev_s cdc_dev_t;
-struct cdc_dev_s {
-    usb_device_handle_t dev_hdl;          // USB device handle
-    void *cb_arg;                         // Common argument for user's callbacks (data IN and Notification)
-    struct {
-        usb_transfer_t *out_xfer;         // OUT data transfer
-        usb_transfer_t *in_xfer;          // IN data transfer
-        cdc_acm_data_callback_t in_cb;    // User's callback for async (non-blocking) data IN
-        uint16_t in_mps;                  // IN endpoint Maximum Packet Size
-        uint8_t *in_data_buffer_base;     // Pointer to IN data buffer in usb_transfer_t
-        const usb_intf_desc_t *intf_desc; // Pointer to data interface descriptor
-        SemaphoreHandle_t out_mux;        // OUT mutex
-    } data;
-
-    struct {
-        usb_transfer_t *xfer;             // IN notification transfer
-        const usb_intf_desc_t *intf_desc; // Pointer to notification interface descriptor, can be NULL if there is no notification channel in the device
-        cdc_acm_host_dev_callback_t cb;   // User's callback for device events
-    } notif;                              // Structure with Notif pipe data
-
-    usb_transfer_t *ctrl_transfer;        // CTRL (endpoint 0) transfer
-    SemaphoreHandle_t ctrl_mux;           // CTRL mutex
-    cdc_acm_uart_state_t serial_state;    // Serial State
-    cdc_comm_protocol_t comm_protocol;
-    cdc_data_protocol_t data_protocol;
-    int             num_cdc_func_desc;    // Number of CDC Functional descriptors in following array
-    const usb_standard_desc_t **cdc_func_desc;   // CDC Functional descriptors
-    SLIST_ENTRY(cdc_dev_s) list_entry;
 };
 
 /**
@@ -143,25 +99,6 @@ static void out_xfer_cb(usb_transfer_t *transfer);
 static void usb_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg);
 
 /**
- * @brief Send CDC specific request
- *
- * Helper function that will send CDC specific request to default endpoint.
- * Both IN and OUT requests are sent through this API, depending on the in_transfer parameter.
- *
- * @see  Chapter 6.2, USB CDC specification rev. 1.2
- * @note CDC specific requests are only supported by devices that have dedicated management element.
- *
- * @param[in] cdc_dev Pointer to CDC device
- * @param[in] in_transfer Direction of data phase. true: IN, false: OUT
- * @param[in] request CDC request code
- * @param[inout] data Pointer to data buffer. Input for OUT transfers, output for IN transfers.
- * @param[in] data_len Length of data buffer
- * @param[in] value Value to be set in bValue of Setup packet
- * @return esp_err_t
- */
-static esp_err_t send_cdc_request(cdc_dev_t *cdc_dev, bool in_transfer, cdc_request_code_t request, uint8_t *data, uint16_t data_len, uint16_t value);
-
-/**
  * @brief Reset IN transfer
  *
  * In in_xfer_cb() we can modify IN transfer parameters, this function resets the transfer to its defaults
@@ -175,6 +112,9 @@ static void cdc_acm_reset_in_transfer(cdc_dev_t *cdc_dev)
     uint8_t **ptr = (uint8_t **)(&(transfer->data_buffer));
     *ptr = cdc_dev->data.in_data_buffer_base;
     transfer->num_bytes = transfer->data_buffer_size;
+    // This is a hotfix for IDF changes, where 'transfer->data_buffer_size' does not contain actual buffer length,
+    // but *allocated* buffer length, which can be larger if CONFIG_HEAP_POISONING_COMPREHENSIVE is enabled
+    transfer->num_bytes -= transfer->data_buffer_size % cdc_dev->data.in_mps;
 }
 
 /**
@@ -186,7 +126,7 @@ static void cdc_acm_reset_in_transfer(cdc_dev_t *cdc_dev)
  */
 static void cdc_acm_client_task(void *arg)
 {
-    vTaskSuspend(NULL); // Task will be resumed from cdc_acm_host_install()
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     cdc_acm_obj_t *cdc_acm_obj = p_cdc_acm_obj; // Make local copy of the driver's handle
     assert(cdc_acm_obj->cdc_acm_client_hdl);
 
@@ -248,19 +188,30 @@ static esp_err_t cdc_acm_start(cdc_dev_t *cdc_dev, cdc_acm_host_dev_callback_t e
     CDC_ACM_EXIT_CRITICAL();
 
     // Claim data interface and start polling its IN endpoint
-    ESP_GOTO_ON_ERROR(usb_host_interface_claim(p_cdc_acm_obj->cdc_acm_client_hdl, cdc_dev->dev_hdl, cdc_dev->data.intf_desc->bInterfaceNumber, 0), err, TAG,);
+    ESP_GOTO_ON_ERROR(
+        usb_host_interface_claim(
+            p_cdc_acm_obj->cdc_acm_client_hdl,
+            cdc_dev->dev_hdl,
+            cdc_dev->data.intf_desc->bInterfaceNumber,
+            cdc_dev->data.intf_desc->bAlternateSetting),
+        err, TAG, "Could not claim interface");
     if (cdc_dev->data.in_xfer) {
-        ESP_LOGD("CDC_ACM", "Submitting poll for BULK IN transfer");
+        ESP_LOGD(TAG, "Submitting poll for BULK IN transfer");
         ESP_ERROR_CHECK(usb_host_transfer_submit(cdc_dev->data.in_xfer));
     }
 
     // If notification are supported, claim its interface and start polling its IN endpoint
     if (cdc_dev->notif.xfer) {
         if (cdc_dev->notif.intf_desc != cdc_dev->data.intf_desc) {
-            ESP_GOTO_ON_ERROR(usb_host_interface_claim(p_cdc_acm_obj->cdc_acm_client_hdl, cdc_dev->dev_hdl,
-                              cdc_dev->notif.intf_desc->bInterfaceNumber, 0), err, TAG,);
+            ESP_GOTO_ON_ERROR(
+                usb_host_interface_claim(
+                    p_cdc_acm_obj->cdc_acm_client_hdl,
+                    cdc_dev->dev_hdl,
+                    cdc_dev->notif.intf_desc->bInterfaceNumber,
+                    cdc_dev->notif.intf_desc->bAlternateSetting),
+                err, TAG, "Could not claim interface");
         }
-        ESP_LOGD("CDC_ACM", "Submitting poll for INTR IN transfer");
+        ESP_LOGD(TAG, "Submitting poll for INTR IN transfer");
         ESP_ERROR_CHECK(usb_host_transfer_submit(cdc_dev->notif.xfer));
     }
 
@@ -327,7 +278,8 @@ static esp_err_t cdc_acm_find_and_open_usb_device(uint16_t vid, uint16_t pid, in
     SLIST_FOREACH(cdc_dev, &p_cdc_acm_obj->cdc_devices_list, list_entry) {
         const usb_device_desc_t *device_desc;
         ESP_ERROR_CHECK(usb_host_get_device_descriptor(cdc_dev->dev_hdl, &device_desc));
-        if (device_desc->idVendor == vid && device_desc->idProduct == pid) {
+        if ((vid == device_desc->idVendor || vid == CDC_HOST_ANY_VID) &&
+                (pid == device_desc->idProduct || pid == CDC_HOST_ANY_PID)) {
             // Return path 1:
             (*dev)->dev_hdl = cdc_dev->dev_hdl;
             return ESP_OK;
@@ -355,7 +307,8 @@ static esp_err_t cdc_acm_find_and_open_usb_device(uint16_t vid, uint16_t pid, in
             assert(current_device);
             const usb_device_desc_t *device_desc;
             ESP_ERROR_CHECK(usb_host_get_device_descriptor(current_device, &device_desc));
-            if (device_desc->idVendor == vid && device_desc->idProduct == pid) {
+            if ((vid == device_desc->idVendor || vid == CDC_HOST_ANY_VID) &&
+                    (pid == device_desc->idProduct || pid == CDC_HOST_ANY_PID)) {
                 // Return path 2:
                 (*dev)->dev_hdl = current_device;
                 return ESP_OK;
@@ -426,7 +379,7 @@ esp_err_t cdc_acm_host_install(const cdc_acm_host_driver_config_t *driver_config
     CDC_ACM_EXIT_CRITICAL();
 
     // Everything OK: Start CDC-Driver task and return
-    vTaskResume(driver_task_h);
+    xTaskNotifyGive(driver_task_h);
     return ESP_OK;
 
 client_err:
@@ -545,13 +498,9 @@ static void cdc_acm_transfers_free(cdc_dev_t *cdc_dev)
  */
 static esp_err_t cdc_acm_transfers_allocate(cdc_dev_t *cdc_dev, const usb_ep_desc_t *notif_ep_desc, const usb_ep_desc_t *in_ep_desc, size_t in_buf_len, const usb_ep_desc_t *out_ep_desc, size_t out_buf_len)
 {
+    assert(in_ep_desc);
+    assert(out_ep_desc);
     esp_err_t ret;
-
-    // 0. Check IN and OUT endpoints
-    // If your open functions fail here, it signals that you either selected wrong interface number
-    // or that you are trying to open IAD CDC device with cdc_acm_host_open_vendor_specific() instead of cdc_acm_host_open()
-    // Refer to README.md for more information
-    ESP_RETURN_ON_FALSE(in_ep_desc && out_ep_desc, ESP_ERR_NOT_FOUND, TAG, "IN or OUT endpoint not found in this data interface");
 
     // 1. Setup notification transfer if it is supported
     if (notif_ep_desc) {
@@ -566,10 +515,8 @@ static esp_err_t cdc_acm_transfers_allocate(cdc_dev_t *cdc_dev, const usb_ep_des
     }
 
     // 2. Setup control transfer
-    usb_device_info_t dev_info;
-    ESP_ERROR_CHECK(usb_host_device_info(cdc_dev->dev_hdl, &dev_info));
     ESP_GOTO_ON_ERROR(
-        usb_host_transfer_alloc(dev_info.bMaxPacketSize0, 0, &cdc_dev->ctrl_transfer),
+        usb_host_transfer_alloc(CDC_ACM_CTRL_TRANSFER_SIZE, 0, &cdc_dev->ctrl_transfer),
         err, TAG,);
     cdc_dev->ctrl_transfer->timeout_ms = 1000;
     cdc_dev->ctrl_transfer->bEndpointAddress = 0;
@@ -618,106 +565,6 @@ err:
     return ret;
 }
 
-/**
- * @brief Find CDC interface descriptor and its endpoint descriptors
- *
- * @note This function is called in open procedure of CDC compliant devices only.
- * @param[in]  cdc_dev  Pointer to CDC device
- * @param[in]  intf_idx Index of CDC interface that should be used for this device
- * @param[out] notif_ep Pointer to notification EP descriptor
- * @param[out] in_ep    Pointer to data IN EP descriptor
- * @param[out] out_ep   Pointer to data OUT EP descriptor
- * @return
- *     - ESP_OK:            Success
- *     - ESP_ERR_NOT_FOUND: Interfaces and endpoints NOT found
- */
-static esp_err_t cdc_acm_find_intf_and_ep_desc(cdc_dev_t *cdc_dev, uint8_t intf_idx, const usb_ep_desc_t **notif_ep, const usb_ep_desc_t **in_ep, const usb_ep_desc_t **out_ep)
-{
-    bool interface_found = false;
-    const usb_config_desc_t *config_desc;
-    const usb_device_desc_t *device_desc;
-    int data_intf_idx, notif_intf_idx;
-    int desc_offset = 0;
-
-    // Get required descriptors
-    ESP_ERROR_CHECK(usb_host_get_device_descriptor(cdc_dev->dev_hdl, &device_desc));
-    ESP_ERROR_CHECK(usb_host_get_active_config_descriptor(cdc_dev->dev_hdl, &config_desc));
-
-    if (((device_desc->bDeviceClass == USB_CLASS_MISC) && (device_desc->bDeviceSubClass == USB_SUBCLASS_COMMON) &&
-            (device_desc->bDeviceProtocol == USB_DEVICE_PROTOCOL_IAD)) ||
-            ((device_desc->bDeviceClass == USB_CLASS_PER_INTERFACE) && (device_desc->bDeviceSubClass == USB_SUBCLASS_NULL) &&
-             (device_desc->bDeviceProtocol == USB_PROTOCOL_NULL))) {
-        // This is a composite device, that uses Interface Association Descriptor
-        const usb_standard_desc_t *this_desc = (const usb_standard_desc_t *)config_desc;
-        do {
-            this_desc = usb_parse_next_descriptor_of_type(
-                            this_desc, config_desc->wTotalLength, USB_B_DESCRIPTOR_TYPE_INTERFACE_ASSOCIATION, &desc_offset);
-
-            if (this_desc == NULL) {
-                break;    // Reached end of configuration descriptor
-            }
-
-            const usb_iad_desc_t *iad_desc = (const usb_iad_desc_t *)this_desc;
-            if (iad_desc->bFirstInterface == intf_idx) {
-                // IAD with correct interface number was found: Check Class/Subclass codes, save Interface indexes
-                assert(iad_desc->bInterfaceCount == 2);
-                assert(iad_desc->bFunctionClass == USB_CLASS_COMM);
-                assert(iad_desc->bFunctionSubClass == USB_CDC_SUBCLASS_ACM);
-                notif_intf_idx = iad_desc->bFirstInterface;
-                data_intf_idx = iad_desc->bFirstInterface + 1;
-                interface_found = true;
-            }
-        } while (!interface_found);
-    } else if ((device_desc->bDeviceClass == USB_CLASS_COMM) && (intf_idx == 0)) {
-        // This is a Communication Device Class
-        notif_intf_idx = 0;
-        data_intf_idx = 1;
-        interface_found = true;
-    }
-
-    // Save found interfaces descriptors:
-    if (interface_found) {
-        // Notification IF and EP
-        cdc_dev->notif.intf_desc = usb_parse_interface_descriptor(config_desc, notif_intf_idx, 0, &desc_offset);
-        assert(cdc_dev->notif.intf_desc);
-
-        // CDC specific descriptors should be right after CDC-Communication interface descriptor
-        // Note: That's why we use usb_parse_next_descriptor instead of usb_parse_next_descriptor_of_type.
-        // The latter could return CDC specific descriptors that don't belong to this interface
-        const usb_standard_desc_t *cdc_desc = (usb_standard_desc_t *)cdc_dev->notif.intf_desc;
-        do {
-            cdc_desc = usb_parse_next_descriptor(cdc_desc, config_desc->wTotalLength, &desc_offset);
-            if ((cdc_desc == NULL) || (cdc_desc->bDescriptorType != ((USB_CLASS_COMM << 4) | USB_B_DESCRIPTOR_TYPE_INTERFACE ))) {
-                break;    // We found all CDC specific descriptors
-            }
-            cdc_dev->num_cdc_func_desc++;
-            cdc_dev->cdc_func_desc =
-                realloc(cdc_dev->cdc_func_desc, cdc_dev->num_cdc_func_desc * (sizeof(usb_standard_desc_t *)));
-            assert(cdc_dev->cdc_func_desc);
-            cdc_dev->cdc_func_desc[cdc_dev->num_cdc_func_desc - 1] = cdc_desc;
-        } while (1);
-        *notif_ep = usb_parse_endpoint_descriptor_by_index(cdc_dev->notif.intf_desc, 0, config_desc->wTotalLength, &desc_offset);
-        assert(notif_ep);
-
-        // Data IF and EP
-        cdc_dev->data.intf_desc = usb_parse_interface_descriptor(config_desc, data_intf_idx, 0, &desc_offset);
-        assert(cdc_dev->data.intf_desc);
-        int temp_offset = desc_offset;
-        for (int i = 0; i < 2; i++) {
-            const usb_ep_desc_t *this_ep = usb_parse_endpoint_descriptor_by_index(cdc_dev->data.intf_desc, i, config_desc->wTotalLength, &desc_offset);
-            assert(this_ep);
-            if (USB_EP_DESC_GET_EP_DIR(this_ep)) {
-                *in_ep = this_ep;
-            } else {
-                *out_ep = this_ep;
-            }
-            desc_offset = temp_offset;
-        }
-        return ESP_OK;
-    }
-    return ESP_ERR_NOT_FOUND;
-}
-
 esp_err_t cdc_acm_host_open(uint16_t vid, uint16_t pid, uint8_t interface_idx, const cdc_acm_host_device_config_t *dev_config, cdc_acm_dev_hdl_t *cdc_hdl_ret)
 {
     esp_err_t ret;
@@ -728,35 +575,49 @@ esp_err_t cdc_acm_host_open(uint16_t vid, uint16_t pid, uint8_t interface_idx, c
     xSemaphoreTake(p_cdc_acm_obj->open_close_mutex, portMAX_DELAY);
     // Find underlying USB device
     cdc_dev_t *cdc_dev;
+    ret =  cdc_acm_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &cdc_dev);
+    if (ESP_OK != ret) {
+        goto exit;
+    }
+
+    // Get Device and Configuration descriptors
+    const usb_config_desc_t *config_desc;
+    const usb_device_desc_t *device_desc;
+    ESP_ERROR_CHECK(usb_host_get_device_descriptor(cdc_dev->dev_hdl, &device_desc));
+    ESP_ERROR_CHECK(usb_host_get_active_config_descriptor(cdc_dev->dev_hdl, &config_desc));
+
+    // Parse the required interface descriptor
+    cdc_parsed_info_t cdc_info;
     ESP_GOTO_ON_ERROR(
-        cdc_acm_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &cdc_dev),
-        exit, TAG, "USB device with VID: 0x%04X, PID: 0x%04X not found", vid, pid);
+        cdc_parse_interface_descriptor(device_desc, config_desc, interface_idx, &cdc_info),
+        err, TAG, "Could not open required interface as CDC");
 
-    // Find and save relevant interface and endpoint descriptors
-    const usb_ep_desc_t *notif_ep = NULL;
-    const usb_ep_desc_t *in_ep = NULL;
-    const usb_ep_desc_t *out_ep = NULL;
-    ESP_GOTO_ON_ERROR(
-        cdc_acm_find_intf_and_ep_desc(cdc_dev, interface_idx, &notif_ep, &in_ep, &out_ep),
-        err, TAG, "Could not find required interface");
-
-    // Check whether found Interfaces are really CDC-ACM
-    assert(cdc_dev->notif.intf_desc->bInterfaceClass == USB_CLASS_COMM);
-    assert(cdc_dev->notif.intf_desc->bInterfaceSubClass == USB_CDC_SUBCLASS_ACM);
-    assert(cdc_dev->notif.intf_desc->bNumEndpoints == 1);
-    assert(cdc_dev->data.intf_desc->bInterfaceClass == USB_CLASS_CDC_DATA);
-    assert(cdc_dev->data.intf_desc->bNumEndpoints == 2);
-
-    // Save Communication and Data protocols
-    cdc_dev->comm_protocol = (cdc_comm_protocol_t)cdc_dev->notif.intf_desc->bInterfaceProtocol;
+    // Save all members of cdc_dev
+    cdc_dev->data.intf_desc = cdc_info.data_intf;
     cdc_dev->data_protocol = (cdc_data_protocol_t)cdc_dev->data.intf_desc->bInterfaceProtocol;
+    cdc_dev->notif.intf_desc = cdc_info.notif_intf;
+    if (cdc_info.notif_intf) {
+        cdc_dev->comm_protocol = (cdc_comm_protocol_t)cdc_dev->notif.intf_desc->bInterfaceProtocol;
+    }
+    cdc_dev->cdc_func_desc = cdc_info.func;
+    cdc_dev->cdc_func_desc_cnt = cdc_info.func_cnt;
+
+    // For CDC compliant devices, this driver provides default implementation of CDC-ACM specific functions.
+    if (cdc_dev->cdc_func_desc_cnt > 1) {
+        cdc_dev->intf_func.line_coding_get = acm_compliant_line_coding_get;
+        cdc_dev->intf_func.line_coding_set = acm_compliant_line_coding_set;
+        cdc_dev->intf_func.set_control_line_state = acm_compliant_set_control_line_state;
+        cdc_dev->intf_func.send_break = acm_compliant_send_break;
+    }
 
     // The following line is here for backward compatibility with v1.0.*
     // where fixed size of IN buffer (equal to IN Maximum Packet Size) was used
-    const size_t in_buf_size = (dev_config->data_cb && (dev_config->in_buffer_size == 0)) ? USB_EP_DESC_GET_MPS(in_ep) : dev_config->in_buffer_size;
+    const size_t in_buf_size = (dev_config->data_cb && (dev_config->in_buffer_size == 0)) ? USB_EP_DESC_GET_MPS(cdc_info.in_ep) : dev_config->in_buffer_size;
 
     // Allocate USB transfers, claim CDC interfaces and return CDC-ACM handle
-    ESP_GOTO_ON_ERROR(cdc_acm_transfers_allocate(cdc_dev, notif_ep, in_ep, in_buf_size, out_ep, dev_config->out_buffer_size), err, TAG,);
+    ESP_GOTO_ON_ERROR(
+        cdc_acm_transfers_allocate(cdc_dev, cdc_info.notif_ep, cdc_info.in_ep, in_buf_size, cdc_info.out_ep, dev_config->out_buffer_size),
+        err, TAG,);
     ESP_GOTO_ON_ERROR(cdc_acm_start(cdc_dev, dev_config->event_cb, dev_config->data_cb, dev_config->user_arg), err, TAG,);
     *cdc_hdl_ret = (cdc_acm_dev_hdl_t)cdc_dev;
     xSemaphoreGive(p_cdc_acm_obj->open_close_mutex);
@@ -767,73 +628,6 @@ err:
 exit:
     xSemaphoreGive(p_cdc_acm_obj->open_close_mutex);
     *cdc_hdl_ret = NULL;
-    return ret;
-}
-
-esp_err_t cdc_acm_host_open_vendor_specific(uint16_t vid, uint16_t pid, uint8_t interface_num, const cdc_acm_host_device_config_t *dev_config, cdc_acm_dev_hdl_t *cdc_hdl_ret)
-{
-    esp_err_t ret;
-    CDC_ACM_CHECK(p_cdc_acm_obj, ESP_ERR_INVALID_STATE);
-    CDC_ACM_CHECK(dev_config, ESP_ERR_INVALID_ARG);
-    CDC_ACM_CHECK(cdc_hdl_ret, ESP_ERR_INVALID_ARG);
-
-    xSemaphoreTake(p_cdc_acm_obj->open_close_mutex, portMAX_DELAY);
-
-    // Find underlying USB device
-    cdc_dev_t *cdc_dev;
-    ret = cdc_acm_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &cdc_dev);
-    if (ESP_OK != ret) {
-        goto exit;
-    }
-
-    // Open procedure for CDC-ACM non-compliant devices:
-    const usb_config_desc_t *config_desc;
-    int desc_offset;
-    ESP_ERROR_CHECK(usb_host_get_active_config_descriptor(cdc_dev->dev_hdl, &config_desc));
-    cdc_dev->data.intf_desc = usb_parse_interface_descriptor(config_desc, interface_num, 0, &desc_offset);
-    ESP_GOTO_ON_FALSE(
-        cdc_dev->data.intf_desc,
-        ESP_ERR_NOT_FOUND, err, TAG, "Required interface no %d was not found.", interface_num);
-    const int temp_offset = desc_offset; // Save this offset for later
-
-    // The interface can have 2-3 endpoints. 2 for data and 1 optional for notifications
-    const usb_ep_desc_t *in_ep = NULL;
-    const usb_ep_desc_t *out_ep = NULL;
-    const usb_ep_desc_t *notif_ep = NULL;
-
-    // Go through all interface's endpoints and parse Interrupt and Bulk endpoints
-    for (int i = 0; i < cdc_dev->data.intf_desc->bNumEndpoints; i++) {
-        const usb_ep_desc_t *this_ep = usb_parse_endpoint_descriptor_by_index(cdc_dev->data.intf_desc, i, config_desc->wTotalLength, &desc_offset);
-        assert(this_ep);
-
-        if (USB_EP_DESC_GET_XFERTYPE(this_ep) == USB_TRANSFER_TYPE_INTR) {
-            // Notification channel does not have its dedicated interface (data and notif interface is the same)
-            cdc_dev->notif.intf_desc = cdc_dev->data.intf_desc;
-            notif_ep = this_ep;
-        } else if (USB_EP_DESC_GET_XFERTYPE(this_ep) == USB_TRANSFER_TYPE_BULK) {
-            if (USB_EP_DESC_GET_EP_DIR(this_ep)) {
-                in_ep = this_ep;
-            } else {
-                out_ep = this_ep;
-            }
-        }
-        desc_offset = temp_offset;
-    }
-
-    // The following line is here for backward compatibility with v1.0.*
-    // where fixed size of IN buffer (equal to IN Maximum Packet Size) was used
-    const size_t in_buf_size = (dev_config->data_cb && (dev_config->in_buffer_size == 0)) ? USB_EP_DESC_GET_MPS(in_ep) : dev_config->in_buffer_size;
-
-    // Allocate USB transfers, claim CDC interfaces and return CDC-ACM handle
-    ESP_GOTO_ON_ERROR(cdc_acm_transfers_allocate(cdc_dev, notif_ep, in_ep, in_buf_size, out_ep, dev_config->out_buffer_size), err, TAG, );
-    ESP_GOTO_ON_ERROR(cdc_acm_start(cdc_dev, dev_config->event_cb, dev_config->data_cb, dev_config->user_arg), err, TAG,);
-    *cdc_hdl_ret = (cdc_acm_dev_hdl_t)cdc_dev;
-    xSemaphoreGive(p_cdc_acm_obj->open_close_mutex);
-    return ESP_OK;
-err:
-    cdc_acm_device_remove(cdc_dev);
-exit:
-    xSemaphoreGive(p_cdc_acm_obj->open_close_mutex);
     return ret;
 }
 
@@ -890,54 +684,6 @@ esp_err_t cdc_acm_host_close(cdc_acm_dev_hdl_t cdc_hdl)
     return ESP_OK;
 }
 
-/**
- * @brief Print CDC specific descriptor in human readable form
- *
- * This is a callback function that is called from USB Host library,
- * when it wants to print full configuration descriptor to stdout.
- *
- * @param[in] _desc CDC specific descriptor
- */
-static void cdc_acm_print_desc(const usb_standard_desc_t *_desc)
-{
-    if (_desc->bDescriptorType != ((USB_CLASS_COMM << 4) | USB_B_DESCRIPTOR_TYPE_INTERFACE )) {
-        // Quietly return in case that this descriptor is not CDC interface descriptor
-        return;
-    }
-
-    switch (((cdc_header_desc_t *)_desc)->bDescriptorSubtype) {
-    case USB_CDC_DESC_SUBTYPE_HEADER: {
-        cdc_header_desc_t *desc = (cdc_header_desc_t *)_desc;
-        printf("\t*** CDC Header Descriptor ***\n");
-        printf("\tbcdCDC: %d.%d0\n", ((desc->bcdCDC >> 8) & 0xF), ((desc->bcdCDC >> 4) & 0xF));
-        break;
-    }
-    case USB_CDC_DESC_SUBTYPE_CALL: {
-        cdc_acm_call_desc_t *desc = (cdc_acm_call_desc_t *)_desc;
-        printf("\t*** CDC Call Descriptor ***\n");
-        printf("\tbmCapabilities: 0x%02X\n", desc->bmCapabilities.val);
-        printf("\tbDataInterface: %d\n", desc->bDataInterface);
-        break;
-    }
-    case USB_CDC_DESC_SUBTYPE_ACM: {
-        cdc_acm_acm_desc_t *desc = (cdc_acm_acm_desc_t *)_desc;
-        printf("\t*** CDC ACM Descriptor ***\n");
-        printf("\tbmCapabilities: 0x%02X\n", desc->bmCapabilities.val);
-        break;
-    }
-    case USB_CDC_DESC_SUBTYPE_UNION: {
-        cdc_union_desc_t *desc = (cdc_union_desc_t *)_desc;
-        printf("\t*** CDC Union Descriptor ***\n");
-        printf("\tbControlInterface: %d\n", desc->bControlInterface);
-        printf("\tbSubordinateInterface[0]: %d\n", desc->bSubordinateInterface[0]);
-        break;
-    }
-    default:
-        ESP_LOGW(TAG, "Unsupported CDC specific descriptor");
-        break;
-    }
-}
-
 void cdc_acm_host_desc_print(cdc_acm_dev_hdl_t cdc_hdl)
 {
     assert(cdc_hdl);
@@ -948,7 +694,7 @@ void cdc_acm_host_desc_print(cdc_acm_dev_hdl_t cdc_hdl)
     ESP_ERROR_CHECK_WITHOUT_ABORT(usb_host_get_device_descriptor(cdc_dev->dev_hdl, &device_desc));
     ESP_ERROR_CHECK_WITHOUT_ABORT(usb_host_get_active_config_descriptor(cdc_dev->dev_hdl, &config_desc));
     usb_print_device_descriptor(device_desc);
-    usb_print_config_descriptor(config_desc, cdc_acm_print_desc);
+    usb_print_config_descriptor(config_desc, cdc_print_desc);
 }
 
 /**
@@ -993,7 +739,7 @@ static bool cdc_acm_is_transfer_completed(usb_transfer_t *transfer)
 
 static void in_xfer_cb(usb_transfer_t *transfer)
 {
-    ESP_LOGD("CDC_ACM", "in xfer cb");
+    ESP_LOGD(TAG, "in xfer cb");
     cdc_dev_t *cdc_dev = (cdc_dev_t *)transfer->context;
 
     if (!cdc_acm_is_transfer_completed(transfer)) {
@@ -1008,6 +754,7 @@ static void in_xfer_cb(usb_transfer_t *transfer)
         // In this case, the next received data must be appended to the existing buffer.
         // Since the data_buffer in usb_transfer_t is a constant pointer, we must cast away to const qualifier.
         if (!data_processed) {
+#if !SOC_CACHE_INTERNAL_MEM_VIA_L1CACHE
             // In case the received data was not processed, the next RX data must be appended to current buffer
             uint8_t **ptr = (uint8_t **)(&(transfer->data_buffer));
             *ptr += transfer->actual_num_bytes;
@@ -1032,18 +779,23 @@ static void in_xfer_cb(usb_transfer_t *transfer)
                 cdc_acm_reset_in_transfer(cdc_dev);
                 cdc_dev->serial_state.bOverRun = false;
             }
+#else
+            // For targets that must sync internal memory through L1CACHE, we cannot change the data_buffer
+            // because it would lead to unaligned cache sync, which is not allowed
+            ESP_LOGW(TAG, "RX buffer append is not yet supported on ESP32-P4!");
+#endif
         } else {
             cdc_acm_reset_in_transfer(cdc_dev);
         }
     }
 
-    ESP_LOGD("CDC_ACM", "Submitting poll for BULK IN transfer");
+    ESP_LOGD(TAG, "Submitting poll for BULK IN transfer");
     usb_host_transfer_submit(cdc_dev->data.in_xfer);
 }
 
 static void notif_xfer_cb(usb_transfer_t *transfer)
 {
-    ESP_LOGD("CDC_ACM", "notif xfer cb");
+    ESP_LOGD(TAG, "notif xfer cb");
     cdc_dev_t *cdc_dev = (cdc_dev_t *)transfer->context;
 
     if (cdc_acm_is_transfer_completed(transfer)) {
@@ -1072,20 +824,20 @@ static void notif_xfer_cb(usb_transfer_t *transfer)
         }
         case USB_CDC_NOTIF_RESPONSE_AVAILABLE: // Encapsulated commands not implemented - fallthrough
         default:
-            ESP_LOGW("CDC_ACM", "Unsupported notification type 0x%02X", notif->bNotificationCode);
-            ESP_LOG_BUFFER_HEX("CDC_ACM", transfer->data_buffer, transfer->actual_num_bytes);
+            ESP_LOGW(TAG, "Unsupported notification type 0x%02X", notif->bNotificationCode);
+            ESP_LOG_BUFFER_HEX(TAG, transfer->data_buffer, transfer->actual_num_bytes);
             break;
         }
 
         // Start polling for new data again
-        ESP_LOGD("CDC_ACM", "Submitting poll for INTR IN transfer");
+        ESP_LOGD(TAG, "Submitting poll for INTR IN transfer");
         usb_host_transfer_submit(cdc_dev->notif.xfer);
     }
 }
 
 static void out_xfer_cb(usb_transfer_t *transfer)
 {
-    ESP_LOGD("CDC_ACM", "out/ctrl xfer cb");
+    ESP_LOGD(TAG, "out/ctrl xfer cb");
     assert(transfer->context);
     xSemaphoreGive((SemaphoreHandle_t)transfer->context);
 }
@@ -1150,7 +902,7 @@ esp_err_t cdc_acm_host_data_tx_blocking(cdc_acm_dev_hdl_t cdc_hdl, const uint8_t
         return ESP_ERR_TIMEOUT;
     }
 
-    ESP_LOGD("CDC_ACM", "Submitting BULK OUT transfer");
+    ESP_LOGD(TAG, "Submitting BULK OUT transfer");
     SemaphoreHandle_t transfer_finished_semaphore = (SemaphoreHandle_t)cdc_dev->data.out_xfer->context;
     xSemaphoreTake(transfer_finished_semaphore, 0); // Make sure the semaphore is taken before we submit new transfer
 
@@ -1177,52 +929,6 @@ unblock:
     return ret;
 }
 
-esp_err_t cdc_acm_host_line_coding_get(cdc_acm_dev_hdl_t cdc_hdl, cdc_acm_line_coding_t *line_coding)
-{
-    CDC_ACM_CHECK(line_coding, ESP_ERR_INVALID_ARG);
-
-    ESP_RETURN_ON_ERROR(
-        send_cdc_request((cdc_dev_t *)cdc_hdl, true, USB_CDC_REQ_GET_LINE_CODING, (uint8_t *)line_coding, sizeof(cdc_acm_line_coding_t), 0),
-        TAG,);
-    ESP_LOGD(TAG, "Line Get: Rate: %"PRIu32", Stop bits: %d, Parity: %d, Databits: %d", line_coding->dwDTERate,
-             line_coding->bCharFormat, line_coding->bParityType, line_coding->bDataBits);
-    return ESP_OK;
-}
-
-esp_err_t cdc_acm_host_line_coding_set(cdc_acm_dev_hdl_t cdc_hdl, const cdc_acm_line_coding_t *line_coding)
-{
-    CDC_ACM_CHECK(line_coding, ESP_ERR_INVALID_ARG);
-
-    ESP_RETURN_ON_ERROR(
-        send_cdc_request((cdc_dev_t *)cdc_hdl, false, USB_CDC_REQ_SET_LINE_CODING, (uint8_t *)line_coding, sizeof(cdc_acm_line_coding_t), 0),
-        TAG,);
-    ESP_LOGD(TAG, "Line Set: Rate: %"PRIu32", Stop bits: %d, Parity: %d, Databits: %d", line_coding->dwDTERate,
-             line_coding->bCharFormat, line_coding->bParityType, line_coding->bDataBits);
-    return ESP_OK;
-}
-
-esp_err_t cdc_acm_host_set_control_line_state(cdc_acm_dev_hdl_t cdc_hdl, bool dtr, bool rts)
-{
-    const uint16_t ctrl_bitmap = (uint16_t)dtr | ((uint16_t)rts << 1);
-
-    ESP_RETURN_ON_ERROR(
-        send_cdc_request((cdc_dev_t *)cdc_hdl, false, USB_CDC_REQ_SET_CONTROL_LINE_STATE, NULL, 0, ctrl_bitmap),
-        TAG,);
-    ESP_LOGD(TAG, "Control Line Set: DTR: %d, RTS: %d", dtr, rts);
-    return ESP_OK;
-}
-
-esp_err_t cdc_acm_host_send_break(cdc_acm_dev_hdl_t cdc_hdl, uint16_t duration_ms)
-{
-    ESP_RETURN_ON_ERROR(
-        send_cdc_request((cdc_dev_t *)cdc_hdl, false, USB_CDC_REQ_SEND_BREAK, NULL, 0, duration_ms),
-        TAG,);
-
-    // Block until break is deasserted
-    vTaskDelay(pdMS_TO_TICKS(duration_ms + 1));
-    return ESP_OK;
-}
-
 esp_err_t cdc_acm_host_send_custom_request(cdc_acm_dev_hdl_t cdc_hdl, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint16_t wLength, uint8_t *data)
 {
     CDC_ACM_CHECK(cdc_hdl, ESP_ERR_INVALID_ARG);
@@ -1235,7 +941,7 @@ esp_err_t cdc_acm_host_send_custom_request(cdc_acm_dev_hdl_t cdc_hdl, uint8_t bm
     esp_err_t ret;
 
     // Take Mutex and fill the CTRL request
-    BaseType_t taken = xSemaphoreTake(cdc_dev->ctrl_mux, pdMS_TO_TICKS(5000));
+    BaseType_t taken = xSemaphoreTake(cdc_dev->ctrl_mux, pdMS_TO_TICKS(CDC_ACM_CTRL_TIMEOUT_MS));
     if (!taken) {
         return ESP_ERR_TIMEOUT;
     }
@@ -1258,7 +964,7 @@ esp_err_t cdc_acm_host_send_custom_request(cdc_acm_dev_hdl_t cdc_hdl, uint8_t bm
         usb_host_transfer_submit_control(p_cdc_acm_obj->cdc_acm_client_hdl, cdc_dev->ctrl_transfer),
         unblock, TAG, "CTRL transfer failed");
 
-    taken = xSemaphoreTake((SemaphoreHandle_t)cdc_dev->ctrl_transfer->context, pdMS_TO_TICKS(5000)); // This is a fixed timeout. Every CDC device should be able to respond to CTRL transfer in 5 seconds
+    taken = xSemaphoreTake((SemaphoreHandle_t)cdc_dev->ctrl_transfer->context, pdMS_TO_TICKS(CDC_ACM_CTRL_TIMEOUT_MS));
     if (!taken) {
         // Transfer was not finished, error in USB LIB. Reset the endpoint
         cdc_acm_reset_transfer_endpoint(cdc_dev->dev_hdl, cdc_dev->ctrl_transfer);
@@ -1278,20 +984,6 @@ esp_err_t cdc_acm_host_send_custom_request(cdc_acm_dev_hdl_t cdc_hdl, uint8_t bm
 unblock:
     xSemaphoreGive(cdc_dev->ctrl_mux);
     return ret;
-}
-
-static esp_err_t send_cdc_request(cdc_dev_t *cdc_dev, bool in_transfer, cdc_request_code_t request, uint8_t *data, uint16_t data_len, uint16_t value)
-{
-    CDC_ACM_CHECK(cdc_dev, ESP_ERR_INVALID_ARG);
-    CDC_ACM_CHECK(cdc_dev->notif.intf_desc, ESP_ERR_NOT_SUPPORTED);
-
-    uint8_t req_type = USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
-    if (in_transfer) {
-        req_type |= USB_BM_REQUEST_TYPE_DIR_IN;
-    } else {
-        req_type |= USB_BM_REQUEST_TYPE_DIR_OUT;
-    }
-    return cdc_acm_host_send_custom_request((cdc_acm_dev_hdl_t) cdc_dev, req_type, request, value, cdc_dev->notif.intf_desc->bInterfaceNumber, data_len, data);
 }
 
 esp_err_t cdc_acm_host_protocols_get(cdc_acm_dev_hdl_t cdc_hdl, cdc_comm_protocol_t *comm, cdc_data_protocol_t *data)
@@ -1316,11 +1008,11 @@ esp_err_t cdc_acm_host_cdc_desc_get(cdc_acm_dev_hdl_t cdc_hdl, cdc_desc_subtype_
     esp_err_t ret = ESP_ERR_NOT_FOUND;
     *desc_out = NULL;
 
-    for (int i = 0; i < cdc_dev->num_cdc_func_desc; i++) {
-        cdc_header_desc_t *_desc = (cdc_header_desc_t *)(cdc_dev->cdc_func_desc[i]);
+    for (int i = 0; i < cdc_dev->cdc_func_desc_cnt; i++) {
+        const cdc_header_desc_t *_desc = (const cdc_header_desc_t *)((*(cdc_dev->cdc_func_desc))[i]);
         if (_desc->bDescriptorSubtype == desc_type) {
             ret = ESP_OK;
-            *desc_out = cdc_dev->cdc_func_desc[i];
+            *desc_out = (const usb_standard_desc_t *)_desc;
             break;
         }
     }
