@@ -1,9 +1,12 @@
 dependencies:
   espressif/usb_host_cdc_acm:
     public: true
-    version: '>=1.0.4,<3.0.0'
-  idf:
-    version: '>=4.4'
+    version: ^2.1.0
+  idf: '>=4.4'
 description: USB Host driver for CP210x series of chips
-url: https://github.com/espressif/idf-extra-components/tree/master/usb/usb_host_cp210x_vcp
-version: 2.0.0
+repository: git://github.com/espressif/esp-usb.git
+repository_info:
+  commit_sha: ebfa6f84ee7c7c070dcc244c79573eeab228298e
+  path: host/class/cdc/usb_host_cp210x_vcp
+url: https://github.com/espressif/esp-usb/tree/master/host/class/cdc/usb_host_cp210x_vcp
+version: 2.2.0
