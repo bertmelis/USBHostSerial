@@ -131,6 +131,26 @@ std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
   return retVal;
 }
 
+void USBHostSerial::flush(bool txOnly) {
+  UBaseType_t numItemsWaiting = 0;
+  do {
+    vRingbufferGetInfo(_tx_buf_handle, nullptr, nullptr, nullptr, nullptr, &numItemsWaiting);
+    taskYIELD();
+  } while (numItemsWaiting > 0);
+
+  // if not only tx has to be flushed, read rx buffer untill empty
+  if (!txOnly) {
+    do {
+      vRingbufferGetInfo(_rx_buf_handle, nullptr, nullptr, nullptr, nullptr, &numItemsWaiting);
+      if (numItemsWaiting > 0) {
+        std::size_t itemSize = 0;
+        void *item = xRingbufferReceiveUpTo(_rx_buf_handle, &itemSize, 0, USBHOSTSERIAL_BUFFERSIZE);
+        vRingbufferReturnItem(_rx_buf_handle, item);
+      }
+    } while (numItemsWaiting > 0);
+  }
+}
+
 void USBHostSerial::setLogger(USBHostSerialLoggerFunc logger) {
   _logger = logger;
 }
@@ -172,6 +192,7 @@ bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) 
 void USBHostSerial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
   if (event->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
     xSemaphoreGive(static_cast<USBHostSerial*>(user_ctx)->_device_disconnected_sem);
+    static_cast<USBHostSerial*>(user_ctx)->_log("USB disconnected");
   }
 }
 

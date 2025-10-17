@@ -67,6 +67,9 @@ class USBHostSerial {
   // read available data into `dest`. returns number of bytes written. maximum number of `size` bytes will be written
   std::size_t read(uint8_t *dest, std::size_t size);
 
+  // block untill all data is written. If txOnly is set to false, data in receive buffer is discarded.
+  void flush(bool txOnly = true);
+
   // add a logger function to direct log messages to
   void setLogger(USBHostSerialLoggerFunc logger);
 
