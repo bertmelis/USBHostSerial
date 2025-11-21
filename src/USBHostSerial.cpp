@@ -112,7 +112,7 @@ std::size_t USBHostSerial::available() {
 uint8_t USBHostSerial::read() {
   std::size_t pxItemSize = 0;
   uint8_t retVal = 0;
-  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, pdMS_TO_TICKS(1), 1);
+  void* ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, pdMS_TO_TICKS(10), 1);
   if (pxItemSize > 0) {
     retVal = *reinterpret_cast<uint8_t*>(ret);
     vRingbufferReturnItem(_rx_buf_handle, ret);
@@ -124,7 +124,7 @@ std::size_t USBHostSerial::read(uint8_t *dest, std::size_t size) {
   std::size_t retVal = 0;
   std::size_t pxItemSize = 0;
   while (size > pxItemSize) {
-    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, pdMS_TO_TICKS(1), size - pxItemSize);
+    void *ret = xRingbufferReceiveUpTo(_rx_buf_handle, &pxItemSize, pdMS_TO_TICKS(10), size - pxItemSize);
     if (ret) {
       std::memcpy(dest, ret, pxItemSize);
       retVal += pxItemSize;
@@ -143,7 +143,7 @@ void USBHostSerial::flush(bool txOnly) {
     taskYIELD();
   } while (numItemsWaiting > 0);
 
-  // if not only tx has to be flushed, read rx buffer untill empty
+  // if not only tx has to be flushed, read rx buffer until empty
   if (!txOnly) {
     do {
       vRingbufferGetInfo(_rx_buf_handle, nullptr, nullptr, nullptr, nullptr, &numItemsWaiting);
@@ -185,15 +185,17 @@ void USBHostSerial::_setup() {
 }
 
 bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) {
-  std::size_t lenReceived = 0;
-  while (lenReceived < data_len && xRingbufferSend(static_cast<USBHostSerial*>(arg)->_rx_buf_handle, &data[lenReceived], 1, pdMS_TO_TICKS(10)) == pdTRUE) {
-    ++lenReceived;
+  USBHostSerial* instance = static_cast<USBHostSerial*>(arg);
+  if (xRingbufferSend(instance->_rx_buf_handle, data, data_len, 0) == pdTRUE) {
+    return true;
   }
-  if (lenReceived < data_len) {
-    // log overflow warning
-    static_cast<USBHostSerial*>(arg)->_log("USB rx buf overflow");
+  // log overflow warning if free buffer space is the issue
+  if (xRingbufferGetCurFreeSize(instance->_rx_buf_handle) < data_len) {
+    instance->_log("USB rx buf overflow");
+    return true;
   }
-  return true;
+  // no spurious logging here, might be an expected timeout
+  return false;
 }
 
 void USBHostSerial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
