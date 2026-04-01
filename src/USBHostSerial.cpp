@@ -177,6 +177,7 @@ bool USBHostSerial::_handle_rx(const uint8_t *data, size_t data_len, void *arg) 
 
 void USBHostSerial::_handle_event(const cdc_acm_host_dev_event_data_t *event, void *user_ctx) {
   if (event->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
+    static_cast<USBHostSerial*>(user_ctx)->_log("USB device disconnected event");
     xSemaphoreGive(static_cast<USBHostSerial*>(user_ctx)->_device_disconnected_sem);
   }
 }
@@ -207,6 +208,7 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
     cdc_acm_dev_hdl_t cdc_dev = NULL;
     auto vcp = std::unique_ptr<CdcAcmDevice>(VCP::open(&dev_config));
     if (vcp == nullptr) {
+      thisInstance->_log("USB VCP open returned null, falling back to CDC");
       // try to fallback to CDC
       err = cdc_acm_host_open(thisInstance->_vid, thisInstance->_pid, 0, &dev_config, &cdc_dev);
       if (err != ESP_OK) {
@@ -220,8 +222,9 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
       thisInstance->_log("USB VCP device opened");
     }
 
-    // mark connected
-    xSemaphoreTake(thisInstance->_device_disconnected_sem, portMAX_DELAY);
+    // Clear any stale disconnect token from a previous cycle.
+    while (xSemaphoreTake(thisInstance->_device_disconnected_sem, 0) == pdTRUE) {
+    }
 
     // set line coding and control line states
     err = ESP_OK;
