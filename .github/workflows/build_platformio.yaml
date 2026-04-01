@@ -9,9 +9,10 @@ jobs:
     container: ghcr.io/bertmelis/pio-test-container
     strategy:
       matrix:
-        example: [
-          examples/loopback/loopback.ino
-        ]
+        example:
+          - examples/loopback/loopback.ino
+          - examples/native_host/native_host.ino
+          - examples/native_peripheral/native_peripheral.ino
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
