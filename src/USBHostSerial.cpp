@@ -210,6 +210,7 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
       // try to fallback to CDC
       err = cdc_acm_host_open(thisInstance->_vid, thisInstance->_pid, 0, &dev_config, &cdc_dev);
       if (err != ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       }
       thisInstance->_fallback = true;
@@ -228,6 +229,11 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
       err = cdc_acm_host_line_coding_set(cdc_dev, &(thisInstance->_line_coding));
       if (err != ESP_OK) {
         thisInstance->_log("USB line coding set error");
+        if (cdc_dev != NULL) {
+          cdc_acm_host_close(cdc_dev);
+          cdc_dev = NULL;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       }
       thisInstance->_log("USB line coding set");
@@ -237,6 +243,11 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
         thisInstance->_log("USB control line state not supported");
       } else if (err != ESP_OK) {
         thisInstance->_log("USB control line state set error");
+        if (cdc_dev != NULL) {
+          cdc_acm_host_close(cdc_dev);
+          cdc_dev = NULL;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       } else {
         thisInstance->_log("USB control line state set");
@@ -245,6 +256,7 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
       err = vcp->line_coding_set(&(thisInstance->_line_coding));
       if (err != ESP_OK) {
         thisInstance->_log("USB line coding set error");
+        vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       }
       thisInstance->_log("USB line coding set");
@@ -254,6 +266,7 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
         thisInstance->_log("USB control line state not supported");
       } else if (err != ESP_OK) {
         thisInstance->_log("USB control line state set error");
+        vTaskDelay(pdMS_TO_TICKS(500));
         continue;
       } else {
         thisInstance->_log("USB control line state set");
@@ -279,11 +292,23 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
         if (err == ESP_OK) {
           vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
         } else {
+          vRingbufferReturnItem(thisInstance->_tx_buf_handle, data);
           thisInstance->_log("Error writing to USB");
+          // Device likely reset/disconnected; break to cleanup/reopen path.
+          if (err == ESP_ERR_INVALID_STATE || err == ESP_ERR_INVALID_RESPONSE || err == ESP_FAIL) {
+            break;
+          }
         }
       }
       taskYIELD();
     }
+
+    // Ensure CDC handles are released before attempting to reopen.
+    if (thisInstance->_fallback && cdc_dev != NULL) {
+      cdc_acm_host_close(cdc_dev);
+      cdc_dev = NULL;
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 
