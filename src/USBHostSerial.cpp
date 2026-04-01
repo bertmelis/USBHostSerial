@@ -222,18 +222,42 @@ void USBHostSerial::_USBHostSerial_task(void *arg) {
     // mark connected
     xSemaphoreTake(thisInstance->_device_disconnected_sem, portMAX_DELAY);
 
-    // set line coding
+    // set line coding and control line states
     err = ESP_OK;
     if (thisInstance->_fallback) {
-      err = cdc_acm_host_line_coding_get(cdc_dev, &(thisInstance->_line_coding));
+      err = cdc_acm_host_line_coding_set(cdc_dev, &(thisInstance->_line_coding));
+      if (err != ESP_OK) {
+        thisInstance->_log("USB line coding set error");
+        continue;
+      }
+      thisInstance->_log("USB line coding set");
+
+      err = cdc_acm_host_set_control_line_state(cdc_dev, true, true);
+      if (err == ESP_ERR_NOT_SUPPORTED) {
+        thisInstance->_log("USB control line state not supported");
+      } else if (err != ESP_OK) {
+        thisInstance->_log("USB control line state set error");
+        continue;
+      } else {
+        thisInstance->_log("USB control line state set");
+      }
     } else {
       err = vcp->line_coding_set(&(thisInstance->_line_coding));
-    }
-    if (err == ESP_OK) {
+      if (err != ESP_OK) {
+        thisInstance->_log("USB line coding set error");
+        continue;
+      }
       thisInstance->_log("USB line coding set");
-    } else {
-      thisInstance->_log("USB line coding error");
-      continue;
+
+      err = vcp->set_control_line_state(true, true);
+      if (err == ESP_ERR_NOT_SUPPORTED) {
+        thisInstance->_log("USB control line state not supported");
+      } else if (err != ESP_OK) {
+        thisInstance->_log("USB control line state set error");
+        continue;
+      } else {
+        thisInstance->_log("USB control line state set");
+      }
     }
 
     // all set, enter loop to start sending
